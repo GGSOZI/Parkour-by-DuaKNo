@@ -188,6 +188,17 @@ local ROLL_ENABLED = true
 local ROLL_MIN_IMPACT = 40
 local ROLL_MIN_SPEED = 22
 local ROLL_TIME = 0.8
+local ROLL_MIN_DROP = 28
+
+local WALLRUN_ENABLED = true
+local WALLRUN_SPEED = 44
+local WALLRUN_TIME = 1.8
+local WALLRUN_MIN_SPEED = 20
+local WALLRUN_REACH = 3.6
+local WALLRUN_DIST = 2.4
+
+local WW_GRACE = 0.45
+local WW_CEIL_CATCH = 7
 
 local WALL_CHAIN_TIME = 1.2
 local WALL_CHAIN_REACH = 9
@@ -520,10 +531,11 @@ if SHOW_TUTORIAL then
 
 		local entries = {
 			{"Wall walk", "Run into a wall to walk on it. Still for 1s = hang. Jump off toward another wall to stick to it."},
+			{"Wall run", "Jump while running next to a wall to run along it. Jump to leap off, push away from the wall to drop."},
 			{"Swing", "A HOLD circle appears on roofs and ledges near you. Hold it to grab on and swing. Let go to fly, or jump for a big launch."},
 			{"Double jump + flip", "Jump, then tap jump again in the air."},
 			{"Slide", "3 jumps: jump, double jump, then a third tap in the air."},
-			{"Roll", "Land a big fall while moving."},
+			{"Roll", "Land from a high fall (" .. ROLL_MIN_DROP .. "+ studs) while moving."},
 			{"Dash", "DASH button (PC: " .. KEY_DASH.Name .. ")."},
 			{"Crawl", "Mobile: hold a finger still on the right side. PC: " .. KEY_CRAWL.Name .. ". Again, or jump, to stand."},
 			{"Emotes", "EMOTES button (PC: " .. KEY_EMOTES.Name .. "). Move or jump to stop."},
@@ -929,21 +941,33 @@ task.spawn(function()
 	stroke.Parent = circle
 	UI.edge(stroke)
 
-	circle.InputBegan:Connect(function(i)
+	local function pressBegan(i)
 		if isPress(i) then
 			swingHeldInput = i
 			Input.swing = true
 			Input.swingAt = os.clock()
 		end
-	end)
-	circle.InputEnded:Connect(function(i)
-		if i == swingHeldInput then
+	end
+	circle.InputBegan:Connect(pressBegan)
+
+	local hit = Instance.new("TextButton")
+	hit.Name = "HitArea"
+	hit.AnchorPoint = Vector2.new(0.5, 0.5)
+	hit.Position = UDim2.fromScale(0.5, 0.5)
+	hit.Size = UDim2.fromScale(2.2, 2.2)
+	hit.BackgroundTransparency = 1
+	hit.AutoButtonColor = false
+	hit.Text = ""
+	hit.ZIndex = 6
+	hit.Parent = circle
+	hit.InputBegan:Connect(pressBegan)
+
+	RunService.RenderStepped:Connect(function()
+		if swingHeldInput and (swingHeldInput.UserInputState == Enum.UserInputState.End
+			or swingHeldInput.UserInputState == Enum.UserInputState.Cancel) then
 			swingHeldInput = nil
 			Input.swing = false
 		end
-	end)
-
-	RunService.RenderStepped:Connect(function()
 		local a = Swing.anchor
 		local cam = workspace.CurrentCamera
 		if a and cam then
@@ -1001,7 +1025,10 @@ UserInputService.InputBegan:Connect(function(i, gp)
 	end
 end)
 UserInputService.InputEnded:Connect(function(i)
-	if i.KeyCode == KEY_SWING or (swingHeldInput and i == swingHeldInput) then
+	local heldEnded = swingHeldInput ~= nil and (i == swingHeldInput
+		or (swingHeldInput.UserInputType == Enum.UserInputType.MouseButton1
+			and i.UserInputType == Enum.UserInputType.MouseButton1))
+	if i.KeyCode == KEY_SWING or heldEnded then
 		swingHeldInput = nil
 		Input.swing = false
 	end
@@ -1207,6 +1234,8 @@ local function bindCharacter(char)
 	local doubleUsed, flipUntil = false, 0
 	local rollPending, rollActive, rollUntil, rollDir, rollSpeed = false, false, 0, Vector3.zAxis, 0
 	local chainUntil, chainN = 0, nil
+	local AirT = {peak = -1e9, last = 0}
+	local WW = {run = false, runUntil = 0, runDir = Vector3.zAxis, side = 1, lost = 0, lastRes = nil}
 
 	local trickFx
 	local function trick(name, sound)
@@ -1233,18 +1262,21 @@ local function bindCharacter(char)
 		return targetSpeed
 	end
 
+	local watchSpeed = false
 	task.delay(0.3, function()
 		if not alive then return end
 		applySpeed(curSpeed)
-		hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-			local v = hum.WalkSpeed
-			if math.abs(v - lastSet) > 0.01 + math.abs(lastSet) * 1e-4 then
-
-				targetSpeed = v
-				hum.WalkSpeed = lastSet
-			end
-		end)
+		watchSpeed = true
 	end)
+
+	local function pollExternalSpeed()
+		if not watchSpeed then return end
+		local v = hum.WalkSpeed
+		if math.abs(v - lastSet) > 0.01 + math.abs(lastSet) * 1e-4 then
+			targetSpeed = v
+			hum.WalkSpeed = lastSet
+		end
+	end
 
 	local fallMin = 0
 	local shakeMag = 0
@@ -1425,7 +1457,9 @@ local function bindCharacter(char)
 			fallMin = 0
 			local lv0 = root.AssemblyLinearVelocity
 			local flatLand = Vector3.new(lv0.X, 0, lv0.Z).Magnitude
-			local willRoll = ROLL_ENABLED and impact > ROLL_MIN_IMPACT
+			local drop = AirT.peak - root.Position.Y
+			AirT.peak = root.Position.Y
+			local willRoll = ROLL_ENABLED and drop >= ROLL_MIN_DROP
 				and (flatLand > 8 or hum.MoveDirection.Magnitude > 0.1)
 			if willRoll then rollPending = true end
 			if impact > 18 then
@@ -1616,6 +1650,9 @@ local function bindCharacter(char)
 		end
 		wwSpeedNow = 0
 		wwStill = 0
+		WW.run = false
+		WW.lost = 0
+		WW.lastRes = nil
 		hum.PlatformStand = true
 		hum.AutoRotate = false
 		root.AssemblyLinearVelocity = Vector3.zero
@@ -1635,6 +1672,8 @@ local function bindCharacter(char)
 
 	local function endWallWalk(now)
 		wallWalking = false
+		local wasRun = WW.run
+		WW.run = false
 		Hang.active = nil
 		wallDust.Enabled = false
 		lv.Enabled = false
@@ -1650,7 +1689,7 @@ local function bindCharacter(char)
 		face = face.Unit
 		local pos = root.Position + Vector3.new(0, 1, 0)
 		root.CFrame = CFrame.lookAt(pos, pos + face)
-		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyLinearVelocity = wasRun and (WW.runDir * math.min(wwSpeedNow, WALLRUN_SPEED) * 0.9 + Vector3.new(0, 4, 0)) or Vector3.zero
 		hum.PlatformStand = false
 		hum.AutoRotate = true
 		hum:ChangeState(Enum.HumanoidStateType.Freefall)
@@ -1660,7 +1699,119 @@ local function bindCharacter(char)
 		tier = 2
 	end
 
+	function WW.find(pos, dir, surfUp, rightV)
+		local reach = WW_DIST + 2.5
+		local r = surfaceHit(pos, dir, reach)
+		if r then return r end
+		local offs = {surfUp * 1.6, -surfUp * 1.6, rightV * 1.6, -rightV * 1.6}
+		for _, o in ipairs(offs) do
+			r = surfaceHit(pos + o, dir, reach + 1)
+			if r and r.Normal:Dot(wwN) > 0.5 then return r end
+		end
+		return nil
+	end
+
+	function WW.start(res, fd, side, spd, now)
+		startWallWalk(res.Normal)
+		local hn = Vector3.new(wwN.X, 0, wwN.Z)
+		hn = hn.Magnitude > 0.1 and hn.Unit or Vector3.new(-fd.Z, 0, fd.X)
+		local run = fd - hn * fd:Dot(hn)
+		run = run.Magnitude > 0.1 and run.Unit or fd
+		WW.run = true
+		WW.runUntil = now + WALLRUN_TIME
+		WW.runDir = run
+		WW.side = side
+		WW.lastRes = res
+		wwLook = run
+		wwSpeedNow = math.clamp(spd, WALLRUN_MIN_SPEED, WALLRUN_SPEED)
+		lv.VectorVelocity = run * wwSpeedNow
+		trick("WALL RUN", "wallStick")
+	end
+
+	function WW.updateRun(now, dt)
+		fallMin = 0
+		Hang.active = nil
+		local pos = root.Position
+		local dir = -wwN
+		local run = WW.runDir
+
+		if now >= WW.runUntil then
+			endWallWalk(now)
+			return
+		end
+
+		local move = hum.MoveDirection
+		if move.Magnitude > 0.1 then
+			local hn = Vector3.new(wwN.X, 0, wwN.Z)
+			if (hn.Magnitude > 0.1 and move:Dot(hn.Unit) > 0.75) or move:Dot(run) < -0.6 then
+				endWallWalk(now)
+				return
+			end
+		end
+
+		local res = surfaceHit(pos, dir, WALLRUN_REACH + 2.5)
+		if res and math.abs(res.Normal.Y) > 0.6 then res = nil end
+		if res then
+			WW.lost = 0
+			WW.lastRes = res
+			local hn2 = Vector3.new(res.Normal.X, 0, res.Normal.Z)
+			if hn2.Magnitude > 0.1 then
+				wwN = wwN:Lerp(hn2.Unit, 0.3).Unit
+				local hn = Vector3.new(wwN.X, 0, wwN.Z)
+				if hn.Magnitude > 0.1 then
+					hn = hn.Unit
+					local r = run - hn * run:Dot(hn)
+					if r.Magnitude > 0.2 then
+						run = r.Unit
+						WW.runDir = run
+						wwLook = run
+					end
+				end
+			end
+		else
+			WW.lost += dt
+			if WW.lost > 0.2 or not WW.lastRes then
+				endWallWalk(now)
+				return
+			end
+			res = WW.lastRes
+		end
+
+		local ahead = surfaceHit(pos, run, 4.5)
+		if ahead and math.abs(ahead.Normal.Y) < 0.5 and ahead.Normal:Dot(run) < -0.5 then
+			WW.run = false
+			wwN = ahead.Normal.Unit
+			local up = projectOnSurface(Vector3.yAxis, wwN)
+			if up.Magnitude > 0.1 then wwLook = up.Unit end
+			wwSpeedNow = 0
+			wwStill = 0
+			return
+		end
+
+		local t = math.clamp(1 - (WW.runUntil - now) / WALLRUN_TIME, 0, 1)
+		local vy = 6 - 15 * t * t
+		wwSpeedNow += (WALLRUN_SPEED - wwSpeedNow) * (1 - math.exp(-5 * dt))
+		local err = (res.Position - pos):Dot(dir) - WALLRUN_DIST
+		lv.VectorVelocity = run * wwSpeedNow + dir * math.clamp(err * 18, -20, 20) + Vector3.new(0, vy, 0)
+		ao.CFrame = CFrame.lookAt(Vector3.zero, run) * CFrame.Angles(0, 0, WW.side * 0.32)
+		wallAttach.WorldPosition = res.Position + wwN * 0.2
+		wallAttach.WorldAxis = wwN
+		wallDust.Enabled = EFFECTS_ENABLED
+
+		if usable(runTrack) then
+			local track = best(runTrack)
+			setTrack(track)
+			track:AdjustSpeed(1.2)
+		else
+			setTrack(nil)
+		end
+	end
+
 	local function updateWallWalk(now, dt)
+		if WW.run then
+			WW.updateRun(now, dt)
+			return
+		end
 		fallMin = 0
 		local pos = root.Position
 		local dir = -wwN
@@ -1686,20 +1837,48 @@ local function bindCharacter(char)
 		local want = alongDir and WALLWALK_SPEED * mag or 0
 		wwSpeedNow += (want - wwSpeedNow) * (1 - math.exp(-9 * dt))
 
-		local res = surfaceHit(pos, dir, WW_DIST + 2.5)
+		local res = WW.find(pos, dir, surfUp, rightV)
+		local usedGrace = false
+
+		if alongDir and wwSpeedNow > 1 and alongDir.Y > 0.3 and math.abs(wwN.Y) < 0.5 then
+			local upHit = surfaceHit(pos, Vector3.yAxis, WW_CEIL_CATCH)
+			if not upHit then upHit = surfaceHit(pos + dir * 1.5, Vector3.yAxis, WW_CEIL_CATCH) end
+			if upHit and upHit.Normal.Y < -0.8 then
+				local away = Vector3.new(wwN.X, 0, wwN.Z)
+				wwN = upHit.Normal.Unit
+				res = upHit
+				dir = -wwN
+				if away.Magnitude > 0.1 then
+					alongDir = away.Unit
+					wwLook = alongDir
+				end
+			end
+		end
 
 		if alongDir and wwSpeedNow > 1 then
-			local ahead = surfaceHit(pos, alongDir, WW_DIST + 0.6)
+			local reachA = WW_DIST + ((alongDir.Y > 0.3) and 2.2 or 0.6)
+			local ahead = surfaceHit(pos, alongDir, reachA)
 			if ahead and ahead.Normal:Dot(wwN) < 0.75 then
 				if ahead.Normal.Y > 0.8 then
-					endWallWalk(now)
-					return
+					if alongDir.Y < -0.25 then
+						endWallWalk(now)
+						return
+					end
 				else
+					local oldN = wwN
 					wwN = ahead.Normal.Unit
 					res = ahead
 					dir = -wwN
-					alongDir = projectOnSurface(alongDir, wwN)
-					alongDir = alongDir.Magnitude > 0.1 and alongDir.Unit or nil
+					if wwN.Y < -0.8 and math.abs(oldN.Y) < 0.5 then
+						local away = Vector3.new(oldN.X, 0, oldN.Z)
+						if away.Magnitude > 0.1 then
+							alongDir = away.Unit
+							wwLook = alongDir
+						end
+					else
+						alongDir = projectOnSurface(alongDir, wwN)
+						alongDir = alongDir.Magnitude > 0.1 and alongDir.Unit or nil
+					end
 				end
 			end
 		end
@@ -1724,14 +1903,24 @@ local function bindCharacter(char)
 				end
 			else
 				local goingUp = alongDir ~= nil and alongDir.Y > 0.5
-				local flatIn = Vector3.new(dir.X, 0, dir.Z)
-				flatIn = flatIn.Magnitude > 0.1 and flatIn.Unit or Vector3.zero
-				endWallWalk(now)
-				if goingUp then
-					root.AssemblyLinearVelocity = flatIn * MANTLE_FORWARD + Vector3.new(0, MANTLE_UP, 0)
+				WW.lost += dt
+				if WW.lastRes and WW.lost <= (goingUp and 0.1 or WW_GRACE) then
+					res = WW.lastRes
+					usedGrace = true
+				else
+					local flatIn = Vector3.new(dir.X, 0, dir.Z)
+					flatIn = flatIn.Magnitude > 0.1 and flatIn.Unit or Vector3.zero
+					endWallWalk(now)
+					if goingUp then
+						root.AssemblyLinearVelocity = flatIn * MANTLE_FORWARD + Vector3.new(0, MANTLE_UP, 0)
+					end
+					return
 				end
-				return
 			end
+		end
+		if not usedGrace then
+			WW.lost = 0
+			WW.lastRes = res
 		end
 
 		local hangMode
@@ -1746,7 +1935,7 @@ local function bindCharacter(char)
 		local hangCfg = hangMode and Hang[hangMode]
 		local err = (res.Position - pos):Dot(dir) - (hangCfg and hangCfg.dist or WW_DIST)
 		local alongVel = alongDir and (alongDir * wwSpeedNow) or Vector3.zero
-		lv.VectorVelocity = alongVel + dir * math.clamp(err * 14, -14, 14)
+		lv.VectorVelocity = alongVel + dir * math.clamp(err * 20, -22, 22)
 
 		if alongDir then
 			local target = projectOnSurface(alongDir, wwN)
@@ -1880,6 +2069,26 @@ local function bindCharacter(char)
 					pushTime = 0
 					startWallWalk(up.Normal)
 					return true
+				end
+			end
+		end
+		if WALLRUN_ENABLED and (state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall) then
+			local v = root.AssemblyLinearVelocity
+			local fv = Vector3.new(v.X, 0, v.Z)
+			local mdv = hum.MoveDirection
+			if fv.Magnitude > WALLRUN_MIN_SPEED and mdv.Magnitude > 0.1
+				and mdv:Dot(fv.Unit) > 0.2
+				and not workspace:Raycast(root.Position, Vector3.new(0, -5.5, 0), rayParams) then
+				local fd = fv.Unit
+				local right = fd:Cross(Vector3.yAxis)
+				for _, side in ipairs({1, -1}) do
+					local wr = wallHit(root.Position, right * side, WALLRUN_REACH)
+					if wr and math.abs(fd:Dot(wr.Normal)) < 0.5
+						and not (now < chainUntil and chainN and wr.Normal:Dot(chainN) > 0.7) then
+						pushTime = 0
+						WW.start(wr, fd, side, fv.Magnitude, now)
+						return true
+					end
 				end
 			end
 		end
@@ -2465,7 +2674,7 @@ local function bindCharacter(char)
 
 	local conn
 	conn = RunService.Heartbeat:Connect(function(dt)
-		if not char.Parent or hum.Health <= 0 then
+		if not char.Parent or hum:GetState() == Enum.HumanoidStateType.Dead then
 			alive = false
 			conn:Disconnect()
 			if jumpConn then jumpConn:Disconnect() end
@@ -2476,6 +2685,7 @@ local function bindCharacter(char)
 		end
 
 		local now = os.clock()
+		pollExternalSpeed()
 
 		local v0 = root.AssemblyLinearVelocity
 		fallMin = math.min(fallMin, v0.Y)
@@ -2484,6 +2694,12 @@ local function bindCharacter(char)
 		Hud.mode = swinging and "swing" or (sliding and "slide" or (wallWalking and "wall" or ""))
 		local fxColor = speedColor(fxA)
 		local grounded = hum.FloorMaterial ~= Enum.Material.Air
+		if grounded then
+			if now - AirT.last > 0.2 then AirT.peak = root.Position.Y end
+		else
+			AirT.last = now
+			if root.Position.Y > AirT.peak then AirT.peak = root.Position.Y end
+		end
 		wind.Enabled = EFFECTS_ENABLED and flat0 > WIND_MIN_SPEED and not climbing and not wallWalking
 		wind.Rate = 10 + 35 * fxA
 		wind.Color = ColorSequence.new(fxColor)
