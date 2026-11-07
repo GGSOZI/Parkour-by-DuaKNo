@@ -1,6 +1,57 @@
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
+
+local ENV = (getgenv and getgenv()) or _G
+do
+	local old = ENV.__ParkourSession
+	if old then
+		for _, f in ipairs(table.clone(old.kills)) do pcall(f) end
+		for _, c in ipairs(old.conns) do pcall(function() c:Disconnect() end) end
+	end
+end
+local Session = {kills = {}, conns = {}}
+ENV.__ParkourSession = Session
+
+local function trackedService(svc)
+	local cache = {}
+	return setmetatable({}, {
+		__index = function(_, k)
+			local v = svc[k]
+			if typeof(v) == "RBXScriptSignal" then
+				local p = cache[k]
+				if not p then
+					p = {
+						Connect = function(_, f)
+							local c = v:Connect(f)
+							table.insert(Session.conns, c)
+							return c
+						end,
+						Once = function(_, f)
+							local c = v:Once(f)
+							table.insert(Session.conns, c)
+							return c
+						end,
+						Wait = function(_)
+							return v:Wait()
+						end,
+					}
+					cache[k] = p
+				end
+				return p
+			elseif type(v) == "function" then
+				return function(_, ...)
+					return v(svc, ...)
+				end
+			end
+			return v
+		end,
+		__newindex = function(_, k, val)
+			svc[k] = val
+		end,
+	})
+end
+
+local RunService = trackedService(game:GetService("RunService"))
+local UserInputService = trackedService(game:GetService("UserInputService"))
 local TweenService = game:GetService("TweenService")
 local Lighting = game:GetService("Lighting")
 
@@ -40,8 +91,22 @@ local IDLE_IDS = {
 	134420469209672,
 	95339769038863,
 	110932098621976,
+	96647504433740,
+	91691744031819,
 
 }
+
+local IDLE_NAMES = {}
+task.spawn(function()
+	local MarketplaceService = game:GetService("MarketplaceService")
+	for i, id in ipairs(IDLE_IDS) do
+		local ok, info = pcall(function()
+			return MarketplaceService:GetProductInfo(id)
+		end)
+		IDLE_NAMES[i] = (ok and info and info.Name) or "unknown"
+		print(("[CustomAnims] Idle %d: %s (%d)"):format(i, IDLE_NAMES[i], id))
+	end
+end)
 
 local JUMP_IDS = {
 	128616002281906,
@@ -596,7 +661,7 @@ if TILT_ENABLED then
 	end)
 end
 
-local Emote = {pending = nil}
+local Emote = {pending = nil, idleOff = false}
 
 if EMOTE_WHEEL then
 	task.spawn(function()
@@ -744,6 +809,21 @@ if EMOTE_WHEEL then
 		closeBtn.Position = UDim2.fromScale(0.5, 0.8)
 		local nextBtn = makeButton(">", center)
 		nextBtn.Position = UDim2.fromScale(0.8, 0.8)
+
+		local idleBtn = makeButton("", wheel)
+		idleBtn.AnchorPoint = Vector2.new(0.5, 0)
+		idleBtn.Position = UDim2.new(0.5, 0, 1, 8)
+		idleBtn.Size = UDim2.fromOffset(140, 26)
+		idleBtn.TextSize = 12
+		local function refreshIdleBtn()
+			idleBtn.Text = Emote.idleOff and "IDLE ANIMS: OFF" or "IDLE ANIMS: ON"
+			idleBtn.TextColor3 = Emote.idleOff and UI.C.sub or UI.C.accentText
+		end
+		refreshIdleBtn()
+		idleBtn.Activated:Connect(function()
+			Emote.idleOff = not Emote.idleOff
+			refreshIdleBtn()
+		end)
 
 		local function layout()
 			local cam = workspace.CurrentCamera
@@ -1044,10 +1124,19 @@ local function bindCharacter(char)
 
 	local alive = true
 
+	local Core = {entries = {}, conns = {}, dead = false}
+	for _, ch in ipairs(root:GetChildren()) do
+		if string.sub(ch.Name, 1, 10) == "CustomAnim" then ch:Destroy() end
+	end
+	if hum:GetAttribute("CA_BaseWS") == nil then
+		hum:SetAttribute("CA_BaseWS", hum.WalkSpeed)
+	end
+
 	local loadQueue = {}
 	local function loadTrack(id, name, looped)
 		local entry = {id = id, name = name, looped = looped, tracks = {}, loaded = false, loading = false, bumped = false, t0 = 0}
 		table.insert(loadQueue, entry)
+		table.insert(Core.entries, entry)
 		return entry
 	end
 
@@ -1451,7 +1540,7 @@ local function bindCharacter(char)
 		end
 	end
 
-	hum.StateChanged:Connect(function(_, new)
+	Core.conns[#Core.conns + 1] = hum.StateChanged:Connect(function(_, new)
 		if new == Enum.HumanoidStateType.Landed then
 			local impact = -fallMin
 			fallMin = 0
@@ -2673,14 +2762,56 @@ local function bindCharacter(char)
 	end)
 
 	local conn
+	Core.kill = function()
+		if Core.dead then return end
+		Core.dead = true
+		alive = false
+		if conn then conn:Disconnect() end
+		if jumpConn then jumpConn:Disconnect() end
+		if legConn then legConn:Disconnect() end
+		for _, c in ipairs(Core.conns) do c:Disconnect() end
+		Swing.anchor = nil
+		Hud.mode = ""
+		Input.swing = false
+		swingHeldInput = nil
+		if ropePart then ropePart:Destroy() ropePart = nil end
+		setTrack(nil)
+		for _, e in ipairs(Core.entries) do
+			for _, t in ipairs(e.tracks) do
+				pcall(function()
+					t:Stop(0)
+					t:Destroy()
+				end)
+			end
+		end
+		pcall(function()
+			lv.Enabled = false
+			ao.Enabled = false
+			hum.CameraOffset = Vector3.zero
+		end)
+		for _, o in ipairs({attach, lv, ao, floorAttach, wallAttach, feetAttach, handAttach, wind, trickSparks}) do
+			pcall(function() o:Destroy() end)
+		end
+		pcall(function()
+			if hum.Health > 0 and hum:GetState() ~= Enum.HumanoidStateType.Dead then
+				hum.PlatformStand = false
+				hum.AutoRotate = true
+				local base = hum:GetAttribute("CA_BaseWS")
+				if base then hum.WalkSpeed = base end
+			end
+		end)
+		for i, f in ipairs(Session.kills) do
+			if f == Core.kill then
+				table.remove(Session.kills, i)
+				break
+			end
+		end
+	end
+	table.insert(Session.kills, Core.kill)
+
 	conn = RunService.Heartbeat:Connect(function(dt)
-		if not char.Parent or hum:GetState() == Enum.HumanoidStateType.Dead then
-			alive = false
-			conn:Disconnect()
-			if jumpConn then jumpConn:Disconnect() end
-			Swing.anchor = nil
-			if ropePart then ropePart:Destroy() ropePart = nil end
-			setTrack(nil)
+		if not char.Parent or hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead then
+			Core.kill()
 			return
 		end
 
@@ -2969,6 +3100,10 @@ local function bindCharacter(char)
 			end
 			if emoteEntry and usable(emoteEntry) then
 				setTrack(best(emoteEntry))
+				return
+			end
+			if Emote.idleOff then
+				setTrack(nil)
 				return
 			end
 			local idle = idleTracks[idleIndex]
@@ -5609,6 +5744,6 @@ task.spawn(playIntroAudio)
 if player.Character then
 	task.spawn(bindCharacter, player.Character)
 end
-player.CharacterAdded:Connect(function(char)
+Session.conns[#Session.conns + 1] = player.CharacterAdded:Connect(function(char)
 	task.spawn(bindCharacter, char)
 end)
