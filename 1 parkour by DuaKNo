@@ -296,6 +296,7 @@ local AUDIO_VOLUME = 1
 local AUDIO_ASSET_ID = 0
 
 local SHOW_DASH_BUTTON = true
+local SHOW_SETTINGS_BUTTON = true
 local KEY_SWING = Enum.KeyCode.E
 local KEY_DASH = Enum.KeyCode.Q
 local KEY_CRAWL = Enum.KeyCode.Z
@@ -418,6 +419,131 @@ function UI.styleButton(b, height)
 	UI.edge(s)
 end
 
+local HttpService = game:GetService("HttpService")
+local HapticService = game:GetService("HapticService")
+
+-- ================= SAVED SETTINGS (on this device) =================
+local Store = {
+	file = "ParkourSettings.json",
+	data = {vibration = true, idleOff = false, overrides = {}},
+	canFile = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function",
+}
+do
+	local cached = ENV.__ParkourSaved
+	if Store.canFile then
+		local ok, res = pcall(function()
+			if isfile(Store.file) then
+				return HttpService:JSONDecode(readfile(Store.file))
+			end
+		end)
+		if ok and type(res) == "table" then cached = res end
+	end
+	if type(cached) == "table" then
+		if type(cached.vibration) == "boolean" then Store.data.vibration = cached.vibration end
+		if type(cached.idleOff) == "boolean" then Store.data.idleOff = cached.idleOff end
+		if type(cached.overrides) == "table" then
+			for k, v in pairs(cached.overrides) do
+				if type(k) == "string" and type(v) == "table" and tonumber(v.id) then
+					Store.data.overrides[k] = {id = tonumber(v.id), name = tostring(v.name or v.id)}
+				end
+			end
+		end
+	end
+end
+local saveQueued = false
+function Store.save()
+	ENV.__ParkourSaved = Store.data
+	if not Store.canFile or saveQueued then return end
+	saveQueued = true
+	task.delay(0.4, function()
+		saveQueued = false
+		pcall(function()
+			-- ids are written as text so 15-digit asset ids can't lose digits in JSON
+			local ov = {}
+			for k, v in pairs(Store.data.overrides) do
+				ov[k] = {id = string.format("%.0f", v.id), name = v.name}
+			end
+			writefile(Store.file, HttpService:JSONEncode({
+				vibration = Store.data.vibration, idleOff = Store.data.idleOff, overrides = ov,
+			}))
+		end)
+	end)
+end
+
+-- ================= CUSTOM ANIMATION PICKS =================
+local Anim = {apply = nil, refreshUI = nil}
+Anim.SLOTS = {
+	{section = "Movement", key = "idle", label = "Idle", note = "standing still"},
+	{section = "Movement", key = "walk", label = "Walk", note = "slow speed"},
+	{section = "Movement", key = "jog", label = "Jog", note = "medium speed"},
+	{section = "Movement", key = "run", label = "Run", note = "full speed"},
+	{section = "In the air", key = "jump", label = "Jump", note = "jumping up"},
+	{section = "In the air", key = "flip", label = "Double jump flip", note = "second jump"},
+	{section = "In the air", key = "fall", label = "Fall", note = "falling"},
+	{section = "In the air", key = "roll", label = "Roll", note = "hard landing"},
+	{section = "Walls and swing", key = "wallhang", label = "Wall hang", note = "hanging on a wall"},
+	{section = "Walls and swing", key = "swing", label = "Swing", note = "swinging"},
+	{section = "Walls and swing", key = "swinghang", label = "Swing hang", note = "slow on a swing"},
+	{section = "Walls and swing", key = "climb", label = "Climb", note = "climbing up"},
+	{section = "Ground", key = "knee", label = "Knee slide", note = "slide"},
+	{section = "Ground", key = "belly", label = "Belly slide", note = "slide"},
+	{section = "Ground", key = "crawl", label = "Crawl", note = "crawling"},
+	{section = "Ground", key = "crouch", label = "Crouch", note = "crouching"},
+}
+function Anim.get(key)
+	return Store.data.overrides[key]
+end
+local function animChanged(key)
+	Store.save()
+	if Anim.apply then Anim.apply(key) end
+	if Anim.refreshUI then Anim.refreshUI() end
+end
+function Anim.set(key, id, name)
+	Store.data.overrides[key] = {id = tonumber(id), name = tostring(name or id)}
+	animChanged(key)
+end
+function Anim.reset(key)
+	Store.data.overrides[key] = nil
+	animChanged(key)
+end
+function Anim.resetAll()
+	Store.data.overrides = {}
+	animChanged(nil)
+end
+
+-- ================= VIBRATION (controller rumble) =================
+local Haptic = {}
+local HAPTIC = {
+	dash = {"Large", 0.5, 0.12}, flip = {"Small", 0.5, 0.08}, land = {"Large", 0.6, 0.1},
+	roll = {"Large", 0.7, 0.15}, slide = {"Small", 0.6, 0.12}, grab = {"Small", 0.8, 0.1},
+	release = {"Small", 0.4, 0.06}, wallStick = {"Small", 0.5, 0.06}, wallJump = {"Small", 0.6, 0.08},
+}
+function Haptic.supported()
+	local ok, res = pcall(function()
+		local pad = Enum.UserInputType.Gamepad1
+		return HapticService:IsVibrationSupported(pad) and HapticService:IsMotorSupported(pad, Enum.VibrationMotor.Small)
+	end)
+	return ok and res == true
+end
+function Haptic.buzz(motorName, strength, dur)
+	if not Store.data.vibration then return end
+	task.spawn(function()
+		pcall(function()
+			local pad = Enum.UserInputType.Gamepad1
+			if not HapticService:IsVibrationSupported(pad) then return end
+			local motor = Enum.VibrationMotor[motorName]
+			if not HapticService:IsMotorSupported(pad, motor) then return end
+			HapticService:SetMotor(pad, motor, strength)
+			task.wait(dur)
+			HapticService:SetMotor(pad, motor, 0)
+		end)
+	end)
+end
+function Haptic.event(name)
+	local h = HAPTIC[name]
+	if h then Haptic.buzz(h[1], h[2], h[3]) end
+end
+
 local SoundService = game:GetService("SoundService")
 local sfxFolder = SoundService:FindFirstChild("CustomAnimSfx")
 if sfxFolder then sfxFolder:Destroy() end
@@ -426,6 +552,7 @@ sfxFolder.Name = "CustomAnimSfx"
 sfxFolder.Parent = SoundService
 local sfxCache = {}
 local function playSfx(name, volume, pitch)
+	Haptic.event(name)
 	if not SFX_ENABLED then return end
 	local id = SFX[name]
 	if not id then return end
@@ -501,146 +628,225 @@ task.spawn(function()
 	end
 end)
 
-if SHOW_TUTORIAL then
-	task.spawn(function()
-		local C = {
-			bg = Color3.fromRGB(22, 18, 30), card = Color3.fromRGB(34, 28, 46), cardHi = Color3.fromRGB(54, 46, 74),
-			line = Color3.fromRGB(62, 52, 86), accent = Color3.fromRGB(112, 70, 180),
-			accentText = Color3.fromRGB(200, 165, 255), text = Color3.fromRGB(235, 230, 245), sub = Color3.fromRGB(165, 155, 185),
-		}
-		local EDGE = {
-			Color3.fromRGB(75, 15, 125), Color3.fromRGB(255, 105, 180),
-			Color3.fromRGB(235, 25, 45), Color3.fromRGB(255, 255, 255),
-		}
-		local EDGE_PERIOD = 14
-		local function edgeColor(t)
-			local n = #EDGE
-			local x = (t / EDGE_PERIOD % 1) * n
-			local i = math.floor(x)
-			local f = x - i
-			f = f * f * (3 - 2 * f)
-			return EDGE[i % n + 1]:Lerp(EDGE[(i + 1) % n + 1], f)
-		end
-		local function mk(class, props, parent)
-			local o = Instance.new(class)
-			for k, v in pairs(props) do o[k] = v end
-			o.Parent = parent
-			return o
-		end
-		local function corner(o, r)
-			mk("UICorner", {CornerRadius = UDim.new(0, r or 8)}, o)
-		end
+local Hooks = {openCustomize = nil}
+local Guide = {gui = nil}
+do
+	local old = player:WaitForChild("PlayerGui"):FindFirstChild("CustomAnimGuide")
+	if old then old:Destroy() end
+end
+table.insert(Session.kills, function()
+	if Guide.gui then Guide.gui:Destroy() end
+end)
 
-		local pg = player:WaitForChild("PlayerGui")
-		local old = pg:FindFirstChild("CustomAnimGuide")
-		if old then old:Destroy() end
-		local gui = mk("ScreenGui", {
-			Name = "CustomAnimGuide", ResetOnSpawn = false, IgnoreGuiInset = true,
-			DisplayOrder = 40, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		}, pg)
+local function closeGuide()
+	local g = Guide.gui
+	Guide.gui = nil
+	if g then g:Destroy() end
+end
 
-		local cam = workspace.CurrentCamera
-		local vs = cam and cam.ViewportSize or Vector2.new(800, 400)
-		local w = math.clamp(vs.X * 0.42, 240, 285)
-		local h = math.clamp(vs.Y * 0.6, 170, 250)
+local function openGuide()
+	closeGuide()
+	local C = UI.C
+	local touch = UserInputService.TouchEnabled
+	local keyboard = UserInputService.KeyboardEnabled
+	local function mk(class, props, parent)
+		local o = Instance.new(class)
+		for k, v in pairs(props) do o[k] = v end
+		o.Parent = parent
+		return o
+	end
+	local function corner(o, r)
+		mk("UICorner", {CornerRadius = UDim.new(0, r or 8)}, o)
+	end
+	local function keyHint(key)
+		if keyboard then return " (PC: " .. key.Name .. ")" end
+		return ""
+	end
 
-		local panel = mk("Frame", {
-			Size = UDim2.fromOffset(w, h), Position = UDim2.new(0, 12, 0.18, 0),
-			BackgroundColor3 = C.bg, BorderSizePixel = 0, ClipsDescendants = true,
-		}, gui)
-		corner(panel, 8)
-		local panelStroke = mk("UIStroke", {Color = edgeColor(0), Thickness = 2}, panel)
+	local pg = player:WaitForChild("PlayerGui")
+	local gui = mk("ScreenGui", {
+		Name = "CustomAnimGuide", ResetOnSpawn = false, IgnoreGuiInset = true,
+		DisplayOrder = 40, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, pg)
+	Guide.gui = gui
 
-		local header = mk("Frame", {Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.card, BorderSizePixel = 0}, panel)
-		local headerLine = mk("Frame", {
-			Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
-			BackgroundColor3 = edgeColor(0), BorderSizePixel = 0,
-		}, header)
-		mk("TextLabel", {
-			Size = UDim2.new(1, -44, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1,
-			Text = "How to move", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.text,
-			TextXAlignment = Enum.TextXAlignment.Left,
-		}, header)
-		local closeBtn = mk("TextButton", {
-			Text = "x", Size = UDim2.fromOffset(26, 20), Position = UDim2.new(1, -32, 0, 5),
-			BackgroundColor3 = C.cardHi, TextColor3 = C.text, Font = Enum.Font.GothamBold,
-			TextSize = 14, BorderSizePixel = 0,
-		}, header)
-		corner(closeBtn, 4)
-		closeBtn.Activated:Connect(function()
-			gui:Destroy()
-		end)
+	local cam = workspace.CurrentCamera
+	local vs = cam and cam.ViewportSize or Vector2.new(800, 400)
+	local w = math.clamp(vs.X * 0.5, 250, 310)
+	local h = math.min(math.clamp(vs.Y * 0.75, 190, 330), vs.Y - 24)
 
-		local page = mk("ScrollingFrame", {
-			Position = UDim2.fromOffset(0, 30), Size = UDim2.new(1, 0, 1, -30), BackgroundTransparency = 1,
-			BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
-			CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		}, panel)
-		mk("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, page)
-		mk("UIPadding", {
-			PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 10),
-			PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 10),
-		}, page)
+	local panel = mk("Frame", {
+		Size = UDim2.fromOffset(w, h), BackgroundColor3 = C.bg, BorderSizePixel = 0,
+		ClipsDescendants = true, Active = true,
+	}, gui)
+	if touch then
+		panel.AnchorPoint = Vector2.new(0.5, 0.5)
+		panel.Position = UDim2.fromScale(0.5, 0.5)
+	else
+		panel.Position = UDim2.new(0, 12, 0.18, 0)
+	end
+	corner(panel, 8)
+	local panelStroke = mk("UIStroke", {Color = UI.edgeColor(0), Thickness = 2}, panel)
+	UI.edge(panelStroke)
 
-		local order = 0
-		local function nextOrder()
-			order += 1
-			return order
-		end
-		mk("TextLabel", {
-			LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1, Text = "Scroll for all moves. The x closes this until you run the script again.",
-			TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = C.sub,
-			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-		}, page)
-
-		local entries = {
-			{"Wall walk", "Run into a wall to walk on it. Still for 1s = hang. Jump off toward another wall to stick to it."},
-			{"Wall run", "Jump while running next to a wall to run along it. Jump to leap off, push away from the wall to drop."},
-			{"Swing", "A HOLD circle appears on roofs and ledges near you. Hold it to grab on and swing. Let go to fly, or jump for a big launch."},
-			{"Double jump + flip", "Jump, then tap jump again in the air."},
-			{"Slide", "3 jumps: jump, double jump, then a third tap in the air."},
-			{"Roll", "Land from a high fall (" .. ROLL_MIN_DROP .. "+ studs) while moving."},
-			{"Dash", "DASH button (PC: " .. KEY_DASH.Name .. ")."},
-			{"Crawl", "Mobile: hold a finger still on the right side. PC: " .. KEY_CRAWL.Name .. ". Again, or jump, to stand."},
-			{"Emotes", "EMOTES button (PC: " .. KEY_EMOTES.Name .. "). Move or jump to stop."},
-		}
-		for _, e in ipairs(entries) do
-			local card = mk("Frame", {
-				LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-				BackgroundColor3 = C.card, BorderSizePixel = 0,
-			}, page)
-			corner(card, 6)
-			mk("UIStroke", {Color = C.line, Thickness = 1}, card)
-			mk("UIPadding", {
-				PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 8),
-				PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
-			}, card)
-			mk("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder}, card)
-			mk("TextLabel", {
-				LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Text = e[1],
-				Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.accentText,
-				TextXAlignment = Enum.TextXAlignment.Left,
-			}, card)
-			mk("TextLabel", {
-				LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-				BackgroundTransparency = 1, Text = e[2], TextWrapped = true, Font = Enum.Font.Gotham,
-				TextSize = 10, TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left,
-				TextYAlignment = Enum.TextYAlignment.Top,
-			}, card)
-		end
-
-		local conn
-		conn = RunService.Heartbeat:Connect(function()
-			if not gui.Parent then
-				conn:Disconnect()
-				return
-			end
-			local c = edgeColor(os.clock())
-			panelStroke.Color = c
-			headerLine.BackgroundColor3 = c
-		end)
+	local header = mk("Frame", {Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = C.card, BorderSizePixel = 0}, panel)
+	local headerLine = mk("Frame", {
+		Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
+		BackgroundColor3 = UI.edgeColor(0), BorderSizePixel = 0,
+	}, header)
+	UI.edge(headerLine, "BackgroundColor3")
+	mk("TextLabel", {
+		Size = UDim2.new(1, -56, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1,
+		Text = "Settings / Controls", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, header)
+	local closeBtn = mk("TextButton", {
+		Text = "x", Size = UDim2.fromOffset(34, 26), Position = UDim2.new(1, -40, 0, 4),
+		BackgroundColor3 = C.cardHi, TextColor3 = C.text, Font = Enum.Font.GothamBold,
+		TextSize = 14, BorderSizePixel = 0,
+	}, header)
+	corner(closeBtn, 4)
+	closeBtn.Activated:Connect(function()
+		if Guide.gui == gui then Guide.gui = nil end
+		gui:Destroy()
 	end)
+
+	local page = mk("ScrollingFrame", {
+		Position = UDim2.fromOffset(0, 34), Size = UDim2.new(1, 0, 1, -34), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+	}, panel)
+	mk("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, page)
+	mk("UIPadding", {
+		PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 10),
+		PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 10),
+	}, page)
+
+	local order = 0
+	local function nextOrder()
+		order += 1
+		return order
+	end
+	local function sectionTitle(text)
+		mk("TextLabel", {
+			LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1,
+			Text = text, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.accentText,
+			TextXAlignment = Enum.TextXAlignment.Left,
+		}, page)
+	end
+	local function newCard()
+		local card = mk("Frame", {
+			LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundColor3 = C.card, BorderSizePixel = 0,
+		}, page)
+		corner(card, 6)
+		mk("UIStroke", {Color = C.line, Thickness = 1}, card)
+		return card
+	end
+	local function settingRow(title, sub, btnText)
+		local card = newCard()
+		card.AutomaticSize = Enum.AutomaticSize.None
+		card.Size = UDim2.new(1, 0, 0, 58)
+		mk("TextLabel", {
+			Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -80, 0, 14), BackgroundTransparency = 1,
+			Text = title, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+		}, card)
+		mk("TextLabel", {
+			Position = UDim2.fromOffset(8, 22), Size = UDim2.new(1, -80, 0, 32), BackgroundTransparency = 1,
+			Text = sub, Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = C.sub, TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		}, card)
+		local btn = mk("TextButton", {
+			Size = UDim2.fromOffset(60, 26), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+			Text = btnText, BackgroundColor3 = C.cardHi, TextColor3 = C.text, Font = Enum.Font.GothamBold,
+			TextSize = 10, BorderSizePixel = 0,
+		}, card)
+		corner(btn, 5)
+		return btn
+	end
+
+	mk("TextLabel", {
+		LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1, Text = "Tap SETTINGS (under EMOTES) any time to open this again.",
+		TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = C.sub,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	}, page)
+
+	sectionTitle("Settings")
+
+	local vibSub = Haptic.supported()
+		and "Controller rumble on dash, landing, roll, grab and slide."
+		or "Rumbles a controller on dash, landing, roll and grab. Roblox can't vibrate phones from scripts."
+	local vibBtn = settingRow("Vibration", vibSub, "")
+	local function paintVib()
+		local on = Store.data.vibration
+		vibBtn.Text = on and "ON" or "OFF"
+		vibBtn.BackgroundColor3 = on and C.accent or C.cardHi
+	end
+	paintVib()
+	vibBtn.Activated:Connect(function()
+		Store.data.vibration = not Store.data.vibration
+		Store.save()
+		paintVib()
+		Haptic.buzz("Small", 0.8, 0.15)
+	end)
+
+	local animBtn = settingRow("Custom animations",
+		"Pick emotes for idle, jump, fall, swing and more. Your picks are saved on this device.", "OPEN")
+	animBtn.Activated:Connect(function()
+		closeGuide()
+		if Hooks.openCustomize then Hooks.openCustomize() end
+	end)
+
+	sectionTitle("Controls")
+
+	local entries = {
+		{"Wall walk", "Run into a wall to walk on it. Still for 1s = hang. Jump off toward another wall to stick to it."},
+		{"Wall run", "Jump while running next to a wall to run along it. Jump to leap off, push away from the wall to drop."},
+		{"Swing", "A HOLD circle appears on roofs and ledges near you. Hold it to grab on and swing" .. keyHint(KEY_SWING) .. ". Let go to fly, or jump for a big launch."},
+		{"Double jump + flip", "Jump, then tap jump again in the air."},
+		{"Slide", "3 jumps: jump, double jump, then a third tap in the air."},
+		{"Roll", "Land from a high fall (" .. ROLL_MIN_DROP .. "+ studs) while moving."},
+		{"Dash", (SHOW_DASH_BUTTON and "DASH button" or "Dash") .. keyHint(KEY_DASH) .. "."},
+		{"Crawl", (touch and "Mobile: hold a finger still on the right side. " or "")
+			.. (keyboard and ("PC: " .. KEY_CRAWL.Name .. ". ") or "") .. "Again, or jump, to stand."},
+	}
+	if EMOTE_WHEEL then
+		table.insert(entries, {"Emotes", "EMOTES button" .. keyHint(KEY_EMOTES) .. ". Move or jump to stop."})
+	end
+	for _, e in ipairs(entries) do
+		local card = newCard()
+		mk("UIPadding", {
+			PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 8),
+			PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+		}, card)
+		mk("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder}, card)
+		mk("TextLabel", {
+			LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Text = e[1],
+			Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.accentText,
+			TextXAlignment = Enum.TextXAlignment.Left,
+		}, card)
+		mk("TextLabel", {
+			LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1, Text = e[2], TextWrapped = true, Font = Enum.Font.Gotham,
+			TextSize = 10, TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+		}, card)
+	end
+end
+
+local function toggleGuide()
+	if Guide.gui and Guide.gui.Parent then
+		closeGuide()
+	else
+		openGuide()
+	end
+end
+
+if SHOW_TUTORIAL then
+	task.spawn(openGuide)
 end
 
 pcall(function()
@@ -661,7 +867,7 @@ if TILT_ENABLED then
 	end)
 end
 
-local Emote = {pending = nil, idleOff = false}
+local Emote = {pending = nil, idleOff = Store.data.idleOff}
 
 if EMOTE_WHEEL then
 	task.spawn(function()
@@ -675,163 +881,184 @@ if EMOTE_WHEEL then
 		gui.IgnoreGuiInset = true
 		gui.DisplayOrder = 30
 		gui.Parent = pg
+		table.insert(Session.kills, function() gui:Destroy() end)
 
+		local C = UI.C
 		local SLOTS = 8
 		local items, page, keyword = {}, 0, ""
 		local pagesObj, loading, finished, gen = nil, false, false, 0
 		local pendingNext = false
 		local statusText = ""
-		local render
+		local hoverIndex = nil
+		local pickKey, pickLabel = nil, ""
+		local tab = "emotes"
+		local render, refreshCustom, setTab, setOpen
 
-		local function corner(obj, r)
-			local c = Instance.new("UICorner")
-			c.CornerRadius = r or UDim.new(1, 0)
-			c.Parent = obj
+		local function mk(class, props, parent)
+			local o = Instance.new(class)
+			for k, v in pairs(props) do o[k] = v end
+			o.Parent = parent
+			return o
 		end
-
-		local function makeButton(text, parent)
-			local b = Instance.new("TextButton")
-			b.AnchorPoint = Vector2.new(0.5, 0.5)
-			b.Size = UDim2.fromOffset(36, 30)
-			b.BackgroundColor3 = UI.C.cardHi
-			b.BackgroundTransparency = 0
-			b.TextColor3 = UI.C.text
+		local function round(o, px)
+			mk("UICorner", {CornerRadius = UDim.new(0, px or 8)}, o)
+		end
+		local function circle(o)
+			mk("UICorner", {CornerRadius = UDim.new(1, 0)}, o)
+		end
+		local function plain(b, hi)
+			b.BackgroundColor3 = hi and C.accent or C.cardHi
+			b.TextColor3 = C.text
 			b.Font = Enum.Font.GothamBold
-			b.TextSize = 16
-			b.Text = text
-			b.Parent = parent
-			corner(b, UDim.new(0, 4))
-			return b
+			b.TextSize = 9
+			b.BorderSizePixel = 0
+			b.AutoButtonColor = true
+			round(b, 5)
 		end
 
-		local openBtn = Instance.new("TextButton")
-		openBtn.Size = UDim2.fromOffset(62, 28)
-		openBtn.AnchorPoint = Vector2.new(1, 0.5)
-		openBtn.Position = UDim2.new(1, -14, 0.5, 38)
-		openBtn.Text = "EMOTES"
-		openBtn.Parent = gui
+		-- the EMOTES button on the right side of the screen
+		local openBtn = mk("TextButton", {
+			Size = UDim2.fromOffset(62, 28), AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -14, 0.5, 38), Text = "EMOTES",
+		}, gui)
 		UI.styleButton(openBtn)
 
-		local wheel = Instance.new("Frame")
-		wheel.AnchorPoint = Vector2.new(0.5, 0.5)
-		wheel.Position = UDim2.fromScale(0.5, 0.5)
-		wheel.BackgroundTransparency = 1
-		wheel.Visible = false
-		wheel.Parent = gui
+		-- main panel
+		local panel = mk("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(320, 400), BackgroundColor3 = C.bg, BackgroundTransparency = 0.05,
+			BorderSizePixel = 0, Visible = false, Active = true, ClipsDescendants = true,
+		}, gui)
+		round(panel, 14)
+		local panelStroke = mk("UIStroke", {Thickness = 2, Color = UI.edgeColor(0)}, panel)
+		UI.edge(panelStroke)
 
-		local back = Instance.new("Frame")
-		back.AnchorPoint = Vector2.new(0.5, 0.5)
-		back.Position = UDim2.fromScale(0.5, 0.5)
-		back.Size = UDim2.fromScale(1, 1)
-		back.BackgroundColor3 = UI.C.bg
-		back.BackgroundTransparency = 0.12
-		back.Parent = wheel
-		corner(back)
-		local backStroke = Instance.new("UIStroke")
-		backStroke.Thickness = 2
-		backStroke.Color = UI.edgeColor(0)
-		backStroke.Parent = back
-		UI.edge(backStroke)
+		local header = mk("Frame", {Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = C.card, BorderSizePixel = 0}, panel)
+		local tabEmotes = mk("TextButton", {
+			Size = UDim2.fromOffset(92, 26), Position = UDim2.fromOffset(8, 5), Text = "EMOTES",
+		}, header)
+		local tabCustom = mk("TextButton", {
+			Size = UDim2.fromOffset(112, 26), Position = UDim2.fromOffset(106, 5), Text = "CUSTOMIZE",
+		}, header)
+		local closeBtn = mk("TextButton", {
+			Size = UDim2.fromOffset(34, 26), Position = UDim2.new(1, -42, 0, 5), Text = "x",
+		}, header)
+		plain(tabEmotes) plain(tabCustom) plain(closeBtn)
+		tabEmotes.TextSize = 10
+		tabCustom.TextSize = 10
+		closeBtn.TextSize = 14
+
+		local body = mk("Frame", {
+			Position = UDim2.fromOffset(0, 36), Size = UDim2.new(1, 0, 1, -36), BackgroundTransparency = 1,
+		}, panel)
+		local emotesView = mk("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1}, body)
+		local customView = mk("ScrollingFrame", {
+			Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+			ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false,
+		}, body)
+
+		-- ===== EMOTES VIEW: hint bar, wheel, search row =====
+		local hint = mk("Frame", {Size = UDim2.new(1, -16, 0, 24), Position = UDim2.fromOffset(8, 4), BackgroundTransparency = 1}, emotesView)
+		local hintText = mk("TextLabel", {
+			Size = UDim2.new(1, -70, 1, 0), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+			TextSize = 11, TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, Text = "",
+		}, hint)
+		local cancelPick = mk("TextButton", {
+			Size = UDim2.fromOffset(62, 20), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0),
+			Text = "CANCEL", Visible = false,
+		}, hint)
+		plain(cancelPick)
+
+		local wheel = mk("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 32),
+			Size = UDim2.fromOffset(250, 250), BackgroundTransparency = 1,
+		}, emotesView)
+		local ring = mk("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.field, BackgroundTransparency = 0.2}, wheel)
+		circle(ring)
+		local ringStroke = mk("UIStroke", {Thickness = 2, Color = UI.edgeColor(0)}, ring)
+		UI.edge(ringStroke)
+
+		local disc = mk("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = C.card, BackgroundTransparency = 0.05,
+		}, wheel)
+		circle(disc)
+		mk("UIStroke", {Thickness = 1, Color = C.line}, disc)
+		local nameLabel = mk("TextLabel", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.36), Size = UDim2.fromScale(0.78, 0.38),
+			BackgroundTransparency = 1, TextColor3 = C.text, Font = Enum.Font.GothamBold, TextScaled = true,
+			TextWrapped = true, Text = "",
+		}, disc)
+		mk("UITextSizeConstraint", {MaxTextSize = 15, MinTextSize = 7}, nameLabel)
+		local pageLabel = mk("TextLabel", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.66), Size = UDim2.fromScale(0.5, 0.14),
+			BackgroundTransparency = 1, TextColor3 = C.accentText, Font = Enum.Font.GothamBold, TextSize = 10, Text = "",
+		}, disc)
+		local prevBtn = mk("TextButton", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.27, 0.83), Size = UDim2.fromOffset(26, 24), Text = "<",
+		}, disc)
+		local nextBtn = mk("TextButton", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.73, 0.83), Size = UDim2.fromOffset(26, 24), Text = ">",
+		}, disc)
+		plain(prevBtn) plain(nextBtn)
+		prevBtn.TextSize = 14
+		nextBtn.TextSize = 14
 
 		local slots = {}
 		for i = 1, SLOTS do
-			local s = Instance.new("ImageButton")
-			s.AnchorPoint = Vector2.new(0.5, 0.5)
-			s.BackgroundColor3 = UI.C.card
-			s.BackgroundTransparency = 0.1
-			s.ScaleType = Enum.ScaleType.Crop
-			s.Image = ""
-			s.Visible = false
-			s.Parent = wheel
-			corner(s)
-			local st = Instance.new("UIStroke")
-			st.Color = UI.C.line
-			st.Transparency = 0
-			st.Thickness = 1
-			st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-			st.Parent = s
-			local lbl = Instance.new("TextLabel")
-			lbl.AnchorPoint = Vector2.new(0.5, 1)
-			lbl.Position = UDim2.fromScale(0.5, 1)
-			lbl.Size = UDim2.fromScale(0.9, 0.34)
-			lbl.BackgroundColor3 = UI.C.bg
-			lbl.BackgroundTransparency = 0.35
-			lbl.TextColor3 = UI.C.text
-			lbl.Font = Enum.Font.GothamBold
-			lbl.TextScaled = true
-			lbl.Text = ""
-			lbl.Parent = s
-			corner(lbl, UDim.new(0, 6))
-			local tc = Instance.new("UITextSizeConstraint")
-			tc.MaxTextSize = 11
-			tc.MinTextSize = 5
-			tc.Parent = lbl
-			slots[i] = {btn = s, label = lbl}
+			local s = mk("ImageButton", {
+				AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = C.card, BackgroundTransparency = 0.05,
+				ScaleType = Enum.ScaleType.Crop, Image = "", Visible = false, AutoButtonColor = false,
+			}, wheel)
+			circle(s)
+			local st = mk("UIStroke", {Color = C.line, Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, s)
+			local sc = mk("UIScale", {Scale = 1}, s)
+			slots[i] = {btn = s, stroke = st, scale = sc}
 		end
 
-		local center = Instance.new("Frame")
-		center.AnchorPoint = Vector2.new(0.5, 0.5)
-		center.Position = UDim2.fromScale(0.5, 0.5)
-		center.Size = UDim2.fromScale(0.42, 0.42)
-		center.BackgroundTransparency = 1
-		center.Parent = wheel
-
-		local search = Instance.new("TextBox")
-		search.AnchorPoint = Vector2.new(0.5, 0.5)
-		search.Position = UDim2.fromScale(0.5, 0.2)
-		search.Size = UDim2.new(1, 0, 0, 28)
-		search.BackgroundColor3 = UI.C.field
-		search.BackgroundTransparency = 0.1
-		search.TextColor3 = UI.C.text
-		search.PlaceholderText = "search emotes"
-		search.PlaceholderColor3 = UI.C.sub
-		search.Font = Enum.Font.Gotham
-		search.TextSize = 14
-		search.Text = ""
-		search.ClearTextOnFocus = false
-		search.Parent = center
-		corner(search, UDim.new(0, 4))
-
-		local pageLabel = Instance.new("TextLabel")
-		pageLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-		pageLabel.Position = UDim2.fromScale(0.5, 0.5)
-		pageLabel.Size = UDim2.new(1, 0, 0, 18)
-		pageLabel.BackgroundTransparency = 1
-		pageLabel.TextColor3 = UI.C.accentText
-		pageLabel.Font = Enum.Font.GothamBold
-		pageLabel.TextSize = 13
-		pageLabel.Text = ""
-		pageLabel.Parent = center
-
-		local prevBtn = makeButton("<", center)
-		prevBtn.Position = UDim2.fromScale(0.2, 0.8)
-		local closeBtn = makeButton("X", center)
-		closeBtn.Position = UDim2.fromScale(0.5, 0.8)
-		local nextBtn = makeButton(">", center)
-		nextBtn.Position = UDim2.fromScale(0.8, 0.8)
-
-		local idleBtn = makeButton("", wheel)
-		idleBtn.AnchorPoint = Vector2.new(0.5, 0)
-		idleBtn.Position = UDim2.new(0.5, 0, 1, 8)
-		idleBtn.Size = UDim2.fromOffset(140, 26)
-		idleBtn.TextSize = 12
+		local bottom = mk("Frame", {
+			AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 8, 1, -6), Size = UDim2.new(1, -16, 0, 28),
+			BackgroundTransparency = 1,
+		}, emotesView)
+		local search = mk("TextBox", {
+			Size = UDim2.new(1, -110, 1, 0), BackgroundColor3 = C.field, TextColor3 = C.text,
+			PlaceholderText = "search emotes", PlaceholderColor3 = C.sub, Font = Enum.Font.Gotham,
+			TextSize = 13, Text = "", ClearTextOnFocus = false, BorderSizePixel = 0,
+			TextXAlignment = Enum.TextXAlignment.Left,
+		}, bottom)
+		round(search, 6)
+		mk("UIPadding", {PaddingLeft = UDim.new(0, 8)}, search)
+		local idleBtn = mk("TextButton", {
+			AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(102, 28), Text = "",
+		}, bottom)
+		plain(idleBtn)
 		local function refreshIdleBtn()
 			idleBtn.Text = Emote.idleOff and "IDLE ANIMS: OFF" or "IDLE ANIMS: ON"
-			idleBtn.TextColor3 = Emote.idleOff and UI.C.sub or UI.C.accentText
+			idleBtn.TextColor3 = Emote.idleOff and C.sub or C.accentText
 		end
 		refreshIdleBtn()
 		idleBtn.Activated:Connect(function()
 			Emote.idleOff = not Emote.idleOff
+			Store.data.idleOff = Emote.idleOff
+			Store.save()
 			refreshIdleBtn()
 		end)
 
 		local function layout()
 			local cam = workspace.CurrentCamera
 			local vs = cam and cam.ViewportSize or Vector2.new(800, 400)
-			local size = math.clamp(math.min(vs.X, vs.Y) * 0.72, 220, 320)
-			wheel.Size = UDim2.fromOffset(size, size)
-			local slot = size * 0.22
-			local radius = size * 0.375
+			local pw = math.clamp(vs.X - 24, 280, 360)
+			local ph = math.clamp(vs.Y - 24, 260, 470)
+			panel.Size = UDim2.fromOffset(pw, ph)
+			local bodyH = ph - 36
+			local avail = bodyH - 32 - 40
+			local S = math.clamp(math.min(pw - 16, avail), 130, 340)
+			wheel.Size = UDim2.fromOffset(S, S)
+			wheel.Position = UDim2.new(0.5, 0, 0, 32 + math.max(0, (avail - S) / 2))
+			local slot = S * 0.21
+			local radius = S * 0.38
 			for i = 1, SLOTS do
 				local a = math.rad(-90 + (i - 1) * (360 / SLOTS))
 				slots[i].btn.Size = UDim2.fromOffset(slot, slot)
@@ -839,27 +1066,66 @@ if EMOTE_WHEEL then
 			end
 		end
 
+		local function updateCenter()
+			local item = hoverIndex and items[page * SLOTS + hoverIndex]
+			if item then
+				nameLabel.Text = item.name
+			elseif statusText ~= "" then
+				nameLabel.Text = statusText
+			elseif loading and #items == 0 then
+				nameLabel.Text = "Loading..."
+			elseif #items == 0 then
+				nameLabel.Text = "No emotes found"
+			elseif pickKey then
+				nameLabel.Text = "Pick one for " .. pickLabel
+			else
+				nameLabel.Text = "Choose an emote"
+			end
+			if #items > 0 then
+				pageLabel.Text = "page " .. (page + 1) .. (loading and " ..." or "")
+			else
+				pageLabel.Text = ""
+			end
+		end
+
+		local function setHover(i)
+			hoverIndex = i
+			for j = 1, SLOTS do
+				local on = (j == i)
+				TweenService:Create(slots[j].scale, TweenInfo.new(0.1), {Scale = on and 1.12 or 1}):Play()
+				slots[j].stroke.Color = on and C.accentText or C.line
+			end
+			updateCenter()
+		end
+
+		local function updateHint()
+			if pickKey then
+				hintText.Text = "Pick an emote for: " .. pickLabel
+				hintText.TextColor3 = C.accentText
+				cancelPick.Visible = true
+			else
+				hintText.Text = "Tap an emote to play it"
+				hintText.TextColor3 = C.sub
+				cancelPick.Visible = false
+			end
+		end
+
 		function render()
+			hoverIndex = nil
 			for i = 1, SLOTS do
 				local item = items[page * SLOTS + i]
 				local s = slots[i]
+				s.scale.Scale = 1
+				s.stroke.Color = C.line
 				if item then
 					s.btn.Visible = true
 					s.btn.Image = "rbxthumb://type=Asset&id=" .. item.id .. "&w=150&h=150"
-					s.label.Text = item.name
 				else
 					s.btn.Visible = false
 				end
 			end
-			if statusText ~= "" then
-				pageLabel.Text = statusText
-			elseif loading and #items == 0 then
-				pageLabel.Text = "loading..."
-			elseif #items == 0 then
-				pageLabel.Text = "no emotes found"
-			else
-				pageLabel.Text = "page " .. (page + 1) .. (loading and " ..." or "")
-			end
+			updateHint()
+			updateCenter()
 		end
 
 		local function fetchMore()
@@ -892,7 +1158,7 @@ if EMOTE_WHEEL then
 				if myGen ~= gen then return end
 				loading = false
 				if not ok then
-					statusText = "can't load (tap > to retry)"
+					statusText = "Can't load. Tap > to retry"
 					warn("[CustomAnims] Emote catalog: " .. tostring(err))
 				end
 				if pendingNext and (page + 1) * SLOTS < #items then
@@ -917,22 +1183,142 @@ if EMOTE_WHEEL then
 			fetchMore()
 		end
 
-		local function setOpen(on)
-			wheel.Visible = on
+		-- ===== CUSTOMIZE VIEW: one row per animation =====
+		local rows = {}
+		do
+			mk("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, customView)
+			mk("UIPadding", {
+				PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 10),
+				PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 10),
+			}, customView)
+			local order = 0
+			local function nxt()
+				order += 1
+				return order
+			end
+			mk("TextLabel", {
+				LayoutOrder = nxt(), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1, TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 10,
+				TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+				Text = "Pick an emote to replace any animation. PICK opens the emote list, DEFAULT puts the original back. "
+					.. (Store.canFile and "Your picks are saved on this device."
+						or "This game can't save files, so your picks last until you leave."),
+			}, customView)
+			local resetAll = mk("TextButton", {LayoutOrder = nxt(), Size = UDim2.new(1, 0, 0, 28), Text = "RESET ALL TO DEFAULT"}, customView)
+			plain(resetAll)
+			resetAll.Activated:Connect(function()
+				Anim.resetAll()
+			end)
+
+			local lastSection
+			for _, s in ipairs(Anim.SLOTS) do
+				if s.section ~= lastSection then
+					lastSection = s.section
+					mk("TextLabel", {
+						LayoutOrder = nxt(), Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+						Text = string.upper(s.section), Font = Enum.Font.GothamBold, TextSize = 11,
+						TextColor3 = C.accentText, TextXAlignment = Enum.TextXAlignment.Left,
+					}, customView)
+				end
+				local card = mk("Frame", {LayoutOrder = nxt(), Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = C.card, BorderSizePixel = 0}, customView)
+				round(card, 6)
+				mk("UIStroke", {Color = C.line, Thickness = 1}, card)
+				mk("TextLabel", {
+					Position = UDim2.fromOffset(10, 5), Size = UDim2.new(1, -132, 0, 16), BackgroundTransparency = 1,
+					Text = s.label, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.text,
+					TextXAlignment = Enum.TextXAlignment.Left,
+				}, card)
+				local val = mk("TextLabel", {
+					Position = UDim2.fromOffset(10, 24), Size = UDim2.new(1, -132, 0, 16), BackgroundTransparency = 1,
+					Text = "", Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = C.sub,
+					TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+				}, card)
+				local pickBtn = mk("TextButton", {
+					Size = UDim2.fromOffset(54, 26), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(1, -118, 0.5, 0), Text = "PICK",
+				}, card)
+				local defBtn = mk("TextButton", {
+					Size = UDim2.fromOffset(54, 26), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(1, -60, 0.5, 0), Text = "DEFAULT",
+				}, card)
+				plain(pickBtn, true)
+				plain(defBtn)
+				pickBtn.Activated:Connect(function()
+					pickKey, pickLabel = s.key, s.label
+					hoverIndex = nil
+					setTab("emotes")
+				end)
+				defBtn.Activated:Connect(function()
+					Anim.reset(s.key)
+				end)
+				rows[#rows + 1] = {slot = s, val = val, defBtn = defBtn}
+			end
+		end
+
+		function refreshCustom()
+			for _, r in ipairs(rows) do
+				local ov = Anim.get(r.slot.key)
+				if ov then
+					r.val.Text = ov.name
+					r.val.TextColor3 = C.accentText
+					r.defBtn.BackgroundTransparency = 0
+					r.defBtn.TextTransparency = 0
+				else
+					r.val.Text = "Default (" .. r.slot.note .. ")"
+					r.val.TextColor3 = C.sub
+					r.defBtn.BackgroundTransparency = 0.6
+					r.defBtn.TextTransparency = 0.5
+				end
+			end
+		end
+		Anim.refreshUI = refreshCustom
+
+		-- ===== tabs / open / close =====
+		local function styleTab(b, active)
+			b.BackgroundColor3 = active and C.accent or C.cardHi
+			b.TextColor3 = active and Color3.new(1, 1, 1) or C.sub
+		end
+
+		function setTab(t)
+			tab = t
+			emotesView.Visible = (t == "emotes")
+			customView.Visible = (t == "custom")
+			styleTab(tabEmotes, t == "emotes")
+			styleTab(tabCustom, t == "custom")
+			if t == "emotes" then
+				layout()
+				if #items == 0 and not loading then fetchMore() end
+				render()
+			else
+				refreshCustom()
+			end
+		end
+
+		function setOpen(on)
+			panel.Visible = on
 			if on then
 				layout()
-				if #items == 0 and not loading then
-					fetchMore()
-				end
-				render()
+				setTab(tab)
+			else
+				pickKey = nil
+				updateHint()
 			end
 		end
 
 		openBtn.Activated:Connect(function()
-			setOpen(not wheel.Visible)
+			setOpen(not panel.Visible)
 		end)
 		closeBtn.Activated:Connect(function()
 			setOpen(false)
+		end)
+		tabEmotes.Activated:Connect(function()
+			setTab("emotes")
+		end)
+		tabCustom.Activated:Connect(function()
+			pickKey = nil
+			setTab("custom")
+		end)
+		cancelPick.Activated:Connect(function()
+			pickKey = nil
+			setTab("custom")
 		end)
 		prevBtn.Activated:Connect(function()
 			if page > 0 then
@@ -957,9 +1343,27 @@ if EMOTE_WHEEL then
 			end
 		end)
 		for i = 1, SLOTS do
-			slots[i].btn.Activated:Connect(function()
+			local b = slots[i].btn
+			b.MouseEnter:Connect(function()
+				if items[page * SLOTS + i] then setHover(i) end
+			end)
+			b.MouseLeave:Connect(function()
+				if hoverIndex == i then setHover(nil) end
+			end)
+			b.InputBegan:Connect(function(inp)
+				if inp.UserInputType == Enum.UserInputType.Touch and items[page * SLOTS + i] then
+					setHover(i)
+				end
+			end)
+			b.Activated:Connect(function()
 				local item = items[page * SLOTS + i]
-				if item then
+				if not item then return end
+				if pickKey then
+					local key = pickKey
+					pickKey = nil
+					Anim.set(key, item.id, item.name)
+					setTab("custom")
+				else
 					Emote.pending = item.id
 					setOpen(false)
 				end
@@ -969,9 +1373,25 @@ if EMOTE_WHEEL then
 		UserInputService.InputBegan:Connect(function(i, gp)
 			if gp then return end
 			if i.KeyCode == KEY_EMOTES then
-				setOpen(not wheel.Visible)
+				setOpen(not panel.Visible)
 			end
 		end)
+
+		local cam = workspace.CurrentCamera
+		if cam then
+			table.insert(Session.conns, cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+				if panel.Visible then layout() end
+			end))
+		end
+
+		styleTab(tabEmotes, true)
+		styleTab(tabCustom, false)
+		refreshCustom()
+		Hooks.openCustomize = function()
+			setOpen(true)
+			pickKey = nil
+			setTab("custom")
+		end
 	end)
 end
 
@@ -1077,6 +1497,19 @@ task.spawn(function()
 			Input.dashAt = os.clock()
 		end)
 	end
+
+	if SHOW_SETTINGS_BUTTON then
+		local c = Instance.new("TextButton")
+		c.Name = "SettingsButton"
+		c.Size = UDim2.fromOffset(62, 28)
+		c.AnchorPoint = Vector2.new(1, 0.5)
+		c.Position = UDim2.new(1, -14, 0.5, 76)
+		c.Text = "SETTINGS"
+		c.Parent = gui
+		UI.styleButton(c)
+		c.TextSize = 9
+		c.Activated:Connect(toggleGuide)
+	end
 end)
 
 UserInputService.InputBegan:Connect(function(i, gp)
@@ -1134,7 +1567,7 @@ local function bindCharacter(char)
 
 	local loadQueue = {}
 	local function loadTrack(id, name, looped)
-		local entry = {id = id, name = name, looped = looped, tracks = {}, loaded = false, loading = false, bumped = false, t0 = 0}
+		local entry = {id = id, name = name, looped = looped, tracks = {}, loaded = false, loading = false, bumped = false, t0 = 0, gen = 0}
 		table.insert(loadQueue, entry)
 		table.insert(Core.entries, entry)
 		return entry
@@ -1143,8 +1576,9 @@ local function bindCharacter(char)
 	local function ensureLoaded(entry)
 		if entry.loaded or entry.loading then return end
 		entry.loading = true
+		local gen = entry.gen
 		local candidates = getCandidates(entry.id)
-		if not alive then return end
+		if not alive or gen ~= entry.gen then return end
 		for _, anim in ipairs(candidates) do
 			local ok, track = pcall(function()
 				return animator:LoadAnimation(anim)
@@ -1182,7 +1616,7 @@ local function bindCharacter(char)
 	end
 
 	local function best(entry)
-		if not entry then return nil end
+		if not entry or entry.disabled then return nil end
 		if not entry.loaded then
 			bump(entry)
 			return nil
@@ -1224,6 +1658,76 @@ local function bindCharacter(char)
 	local crouchTracks = loadList(CROUCH_IDS, "Crouch", true)
 	local crawlTracks = loadList(CRAWL_IDS, "Crawl", true)
 	local climbTracks = loadList(CLIMB_IDS, "Climb", true)
+
+	do
+		local slotMap = {
+			idle = {list = idleTracks, defaults = IDLE_IDS, label = "Idle", looped = true},
+			walk = {entry = walkTrack, default = WALK_ID},
+			jog = {entry = mediumTrack, default = MEDIUM_ID},
+			run = {entry = runTrack, default = RUN_ID},
+			jump = {list = jumpTracks, defaults = JUMP_IDS, label = "Jump", looped = false},
+			flip = {entry = flipTrack, default = FLIP_ID},
+			fall = {list = fallTracks, defaults = FALL_IDS, label = "Fall", looped = true},
+			roll = {entry = rollTrack, default = ROLL_ID},
+			wallhang = {entry = wallIdleTrack, default = WALL_IDLE_ID},
+			swing = {list = swingTracks, defaults = SWING_IDS, label = "Swing", looped = true},
+			swinghang = {entry = swingHangTrack, default = SWING_HANG_ID},
+			climb = {list = climbTracks, defaults = CLIMB_IDS, label = "Climb", looped = true},
+			knee = {entry = kneeTrack, default = KNEE_SLIDE_ID},
+			belly = {entry = bellyTrack, default = BELLY_SLIDE_ID},
+			crawl = {list = crawlTracks, defaults = CRAWL_IDS, label = "Crawl", looped = true},
+			crouch = {list = crouchTracks, defaults = CROUCH_IDS, label = "Crouch", looped = true},
+		}
+		local function stopEntry(e)
+			for _, t in ipairs(e.tracks) do
+				pcall(function() t:Stop(0.1) end)
+			end
+			e.tracks = {}
+		end
+		local function resetEntry(e, id, name)
+			if e.id == id and not e.disabled then return end
+			stopEntry(e)
+			e.gen += 1
+			e.id = id
+			e.name = name
+			e.loaded, e.loading, e.bumped, e.disabled = false, false, false, nil
+			table.insert(loadQueue, 1, e)
+		end
+		local function applySlot(key)
+			local s = slotMap[key]
+			if not s then return end
+			local ov = Anim.get(key)
+			if s.list then
+				local wanted = ov and {ov.id} or s.defaults
+				for i = 1, math.max(#s.list, #wanted) do
+					local e, id = s.list[i], wanted[i]
+					if id then
+						local nm = s.label .. " " .. i .. " (" .. id .. ")"
+						if e then
+							resetEntry(e, id, nm)
+						else
+							s.list[i] = loadTrack(id, nm, s.looped)
+						end
+					elseif e and not e.disabled then
+						e.disabled = true
+						stopEntry(e)
+					end
+				end
+			else
+				local id = ov and ov.id or s.default
+				resetEntry(s.entry, id, "Anim " .. key .. " (" .. id .. ")")
+			end
+		end
+		Anim.apply = function(key)
+			if not alive then return end
+			if key then
+				applySlot(key)
+			else
+				for k in pairs(slotMap) do applySlot(k) end
+			end
+		end
+		Anim.apply()
+	end
 
 	for _ = 1, 3 do
 		task.spawn(function()
