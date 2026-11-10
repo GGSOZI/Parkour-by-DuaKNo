@@ -57,6 +57,32 @@ local Lighting = game:GetService("Lighting")
 
 local player = Players.LocalPlayer
 
+-- ================= MOVES ON / OFF (every move is ON by default, choices are saved) =================
+local Sys = {flags = {}, listeners = {}}
+function Sys.on(key) return Sys.flags[key] == true end
+function Sys.any()
+	for _, v in pairs(Sys.flags) do
+		if v then return true end
+	end
+	return false
+end
+Sys.LIST = {
+	{key = "wallwalk", label = "Wall walk / climb", note = "Run into a wall to walk on it. Still for 1s = hang. Jump toward another wall to stick to it."},
+	{key = "wallrun", label = "Wall run", note = "Jump while running next to a wall to run along it."},
+	{key = "ceiling", label = "Ceiling walk", note = "Jump up into a ceiling to walk upside down on it."},
+	{key = "vault", label = "Vault", note = "Run into a low ledge to hop over it."},
+	{key = "swing", label = "Swing", note = "A HOLD circle shows on roofs and ledges. Hold it to swing."},
+	{key = "doublejump", label = "Double jump + flip", note = "Tap jump again in the air."},
+	{key = "slide", label = "Slide", note = "Third jump tap in the air slams down into a slide. Needs Double jump ON."},
+	{key = "roll", label = "Roll", note = "Roll when you land from a high fall while moving."},
+	{key = "dash", label = "Dash", note = "Shows the DASH button and enables the dash key."},
+	{key = "crawl", label = "Crawl", note = "Crawl stance (key or long press on the right side)."},
+	{key = "speed", label = "Speed build-up", note = "Start slow and speed up to a very high run speed. OFF keeps the game's normal speed."},
+	{key = "camera", label = "Camera effects", note = "FOV zoom with speed, speed blur and camera tilt."},
+	{key = "fx", label = "Particles + shake", note = "Dust, sparks, shockwaves and screen shake."},
+	{key = "sfx", label = "Move sounds + rumble", note = "Sound effects and controller rumble for moves."},
+}
+
 task.spawn(function()
 	local StarterGui = game:GetService("StarterGui")
 	local function notify(title, text, icon, dur)
@@ -337,6 +363,7 @@ end
 local fovKick = 0
 do
 	local fov = MIN_FOV
+	local fovOn, fovSaved = false, nil
 	local oldBlur = Lighting:FindFirstChild("CustomAnimSpeedBlur")
 	if oldBlur then oldBlur:Destroy() end
 	local blur = Instance.new("BlurEffect")
@@ -349,6 +376,20 @@ do
 		RunService.RenderStepped:Connect(function(dt)
 			local camera = workspace.CurrentCamera
 			if not camera then return end
+			if not Sys.on("camera") then
+				if fovOn then
+					fovOn = false
+					if fovSaved then camera.FieldOfView = fovSaved end
+					blur.Size = 0
+				end
+				fovKick = 0
+				return
+			end
+			if not fovOn then
+				fovOn = true
+				fovSaved = camera.FieldOfView
+				fov = math.clamp(fovSaved, MIN_FOV, MAX_FOV)
+			end
 			local char = player.Character
 			local root = char and char:FindFirstChild("HumanoidRootPart")
 			local speed = 0
@@ -425,7 +466,7 @@ local HapticService = game:GetService("HapticService")
 -- ================= SAVED SETTINGS (on this device) =================
 local Store = {
 	file = "ParkourSettings.json",
-	data = {vibration = true, idleOff = false, overrides = {}},
+	data = {vibration = true, idleOff = false, overrides = {}, systems = {}},
 	canFile = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function",
 }
 do
@@ -443,9 +484,25 @@ do
 		if type(cached.idleOff) == "boolean" then Store.data.idleOff = cached.idleOff end
 		if type(cached.overrides) == "table" then
 			for k, v in pairs(cached.overrides) do
-				if type(k) == "string" and type(v) == "table" and tonumber(v.id) then
-					Store.data.overrides[k] = {id = tonumber(v.id), name = tostring(v.name or v.id)}
+				if type(k) == "string" and type(v) == "table" then
+					local list = {}
+					if tonumber(v.id) then
+						-- old save format: one animation per slot
+						list[1] = {id = tonumber(v.id), name = tostring(v.name or v.id)}
+					else
+						for _, it in ipairs(v) do
+							if type(it) == "table" and tonumber(it.id) then
+								list[#list + 1] = {id = tonumber(it.id), name = tostring(it.name or it.id)}
+							end
+						end
+					end
+					if #list > 0 then Store.data.overrides[k] = list end
 				end
+			end
+		end
+		if type(cached.systems) == "table" then
+			for k, v in pairs(cached.systems) do
+				if type(k) == "string" and type(v) == "boolean" then Store.data.systems[k] = v end
 			end
 		end
 	end
@@ -460,14 +517,30 @@ function Store.save()
 		pcall(function()
 			-- ids are written as text so 15-digit asset ids can't lose digits in JSON
 			local ov = {}
-			for k, v in pairs(Store.data.overrides) do
-				ov[k] = {id = string.format("%.0f", v.id), name = v.name}
+			for k, list in pairs(Store.data.overrides) do
+				local out = {}
+				for _, it in ipairs(list) do
+					out[#out + 1] = {id = string.format("%.0f", it.id), name = it.name}
+				end
+				ov[k] = out
 			end
 			writefile(Store.file, HttpService:JSONEncode({
 				vibration = Store.data.vibration, idleOff = Store.data.idleOff, overrides = ov,
+				systems = Store.data.systems,
 			}))
 		end)
 	end)
+end
+
+for _, d in ipairs(Sys.LIST) do
+	Sys.flags[d.key] = Store.data.systems[d.key] ~= false
+end
+function Sys.set(key, on)
+	on = on == true
+	Store.data.systems[key] = on
+	Sys.flags[key] = on
+	Store.save()
+	for _, f in ipairs(Sys.listeners) do pcall(f, key, on) end
 end
 
 -- ================= CUSTOM ANIMATION PICKS =================
@@ -491,15 +564,35 @@ Anim.SLOTS = {
 	{section = "Ground", key = "crouch", label = "Crouch", note = "crouching"},
 }
 function Anim.get(key)
-	return Store.data.overrides[key]
+	local list = Store.data.overrides[key]
+	if list and #list > 0 then return list end
+	return nil
 end
 local function animChanged(key)
 	Store.save()
 	if Anim.apply then Anim.apply(key) end
 	if Anim.refreshUI then Anim.refreshUI() end
 end
-function Anim.set(key, id, name)
-	Store.data.overrides[key] = {id = tonumber(id), name = tostring(name or id)}
+Anim.MAX = 8
+-- adds one more animation to a slot (several can be added, one is picked at random each time)
+function Anim.add(key, id, name)
+	id = tonumber(id)
+	if not id then return false end
+	local list = Store.data.overrides[key] or {}
+	for _, it in ipairs(list) do
+		if it.id == id then return false end
+	end
+	if #list >= Anim.MAX then return false end
+	list[#list + 1] = {id = id, name = tostring(name or id)}
+	Store.data.overrides[key] = list
+	animChanged(key)
+	return true
+end
+function Anim.removeAt(key, i)
+	local list = Store.data.overrides[key]
+	if not (list and list[i]) then return end
+	table.remove(list, i)
+	if #list == 0 then Store.data.overrides[key] = nil end
 	animChanged(key)
 end
 function Anim.reset(key)
@@ -552,6 +645,7 @@ sfxFolder.Name = "CustomAnimSfx"
 sfxFolder.Parent = SoundService
 local sfxCache = {}
 local function playSfx(name, volume, pitch)
+	if not Sys.on("sfx") then return end
 	Haptic.event(name)
 	if not SFX_ENABLED then return end
 	local id = SFX[name]
@@ -794,13 +888,48 @@ local function openGuide()
 	end)
 
 	local animBtn = settingRow("Custom animations",
-		"Pick emotes for idle, jump, fall, swing and more. Your picks are saved on this device.", "OPEN")
+		"Pick emotes for idle, walk, run, jump, fall and more. You can add several to one slot. Saved on this device.", "OPEN")
 	animBtn.Activated:Connect(function()
 		closeGuide()
 		if Hooks.openCustomize then Hooks.openCustomize() end
 	end)
 
-	sectionTitle("Controls")
+	sectionTitle("Parkour moves")
+	mk("TextLabel", {
+		LayoutOrder = nextOrder(), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1, TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = C.sub,
+		Text = "Every move is ON by default. Turn off the ones you do not want. Your choices are saved.",
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	}, page)
+	local moveBtns = {}
+	local allBtn = settingRow("All moves", "Turn every move on or off at once.", "")
+	allBtn.TextSize = 9
+	local function paintMoves()
+		for _, mb in ipairs(moveBtns) do
+			local on = Sys.on(mb.key)
+			mb.btn.Text = on and "ON" or "OFF"
+			mb.btn.BackgroundColor3 = on and C.accent or C.cardHi
+		end
+		local any = Sys.any()
+		allBtn.Text = any and "ALL OFF" or "ALL ON"
+		allBtn.BackgroundColor3 = any and C.accent or C.cardHi
+	end
+	allBtn.Activated:Connect(function()
+		local turnOn = not Sys.any()
+		for _, d in ipairs(Sys.LIST) do Sys.set(d.key, turnOn) end
+		paintMoves()
+	end)
+	for _, d in ipairs(Sys.LIST) do
+		local b = settingRow(d.label, d.note, "")
+		moveBtns[#moveBtns + 1] = {key = d.key, btn = b}
+		b.Activated:Connect(function()
+			Sys.set(d.key, not Sys.on(d.key))
+			paintMoves()
+		end)
+	end
+	paintMoves()
+
+	sectionTitle("Controls (when the move is ON)")
 
 	local entries = {
 		{"Wall walk", "Run into a wall to walk on it. Still for 1s = hang. Jump off toward another wall to stick to it."},
@@ -855,6 +984,10 @@ end)
 if TILT_ENABLED then
 	local tilt = 0
 	RunService:BindToRenderStep("CustomAnimTilt", Enum.RenderPriority.Camera.Value + 1, function(dt)
+		if not Sys.on("camera") then
+			tilt = 0
+			return
+		end
 		local cam = workspace.CurrentCamera
 		local char = player.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -1077,7 +1210,7 @@ if EMOTE_WHEEL then
 			elseif #items == 0 then
 				nameLabel.Text = "No emotes found"
 			elseif pickKey then
-				nameLabel.Text = "Pick one for " .. pickLabel
+				nameLabel.Text = "Add one to " .. pickLabel
 			else
 				nameLabel.Text = "Choose an emote"
 			end
@@ -1100,7 +1233,7 @@ if EMOTE_WHEEL then
 
 		local function updateHint()
 			if pickKey then
-				hintText.Text = "Pick an emote for: " .. pickLabel
+				hintText.Text = "Add an emote to: " .. pickLabel
 				hintText.TextColor3 = C.accentText
 				cancelPick.Visible = true
 			else
@@ -1200,7 +1333,7 @@ if EMOTE_WHEEL then
 				LayoutOrder = nxt(), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
 				BackgroundTransparency = 1, TextWrapped = true, Font = Enum.Font.Gotham, TextSize = 10,
 				TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-				Text = "Pick an emote to replace any animation. PICK opens the emote list, DEFAULT puts the original back. "
+				Text = "Add emotes to any animation slot. You can add up to " .. Anim.MAX .. " to one slot and one is picked at random each time. ADD opens the emote list, x removes one, DEFAULT puts the original back. "
 					.. (Store.canFile and "Your picks are saved on this device."
 						or "This game can't save files, so your picks last until you leave."),
 			}, customView)
@@ -1220,27 +1353,39 @@ if EMOTE_WHEEL then
 						TextColor3 = C.accentText, TextXAlignment = Enum.TextXAlignment.Left,
 					}, customView)
 				end
-				local card = mk("Frame", {LayoutOrder = nxt(), Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = C.card, BorderSizePixel = 0}, customView)
+				local card = mk("Frame", {
+					LayoutOrder = nxt(), Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundColor3 = C.card, BorderSizePixel = 0,
+				}, customView)
 				round(card, 6)
 				mk("UIStroke", {Color = C.line, Thickness = 1}, card)
+				mk("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder}, card)
+				local head = mk("Frame", {LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1}, card)
 				mk("TextLabel", {
 					Position = UDim2.fromOffset(10, 5), Size = UDim2.new(1, -132, 0, 16), BackgroundTransparency = 1,
 					Text = s.label, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.text,
 					TextXAlignment = Enum.TextXAlignment.Left,
-				}, card)
+				}, head)
 				local val = mk("TextLabel", {
 					Position = UDim2.fromOffset(10, 24), Size = UDim2.new(1, -132, 0, 16), BackgroundTransparency = 1,
 					Text = "", Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = C.sub,
 					TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-				}, card)
+				}, head)
 				local pickBtn = mk("TextButton", {
-					Size = UDim2.fromOffset(54, 26), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(1, -118, 0.5, 0), Text = "PICK",
-				}, card)
+					Size = UDim2.fromOffset(54, 26), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(1, -118, 0.5, 0), Text = "ADD",
+				}, head)
 				local defBtn = mk("TextButton", {
 					Size = UDim2.fromOffset(54, 26), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(1, -60, 0.5, 0), Text = "DEFAULT",
-				}, card)
+				}, head)
 				plain(pickBtn, true)
 				plain(defBtn)
+				local listFrame = mk("Frame", {
+					LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+				}, card)
+				mk("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder}, listFrame)
+				local listPad = mk("UIPadding", {
+					PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 0),
+				}, listFrame)
 				pickBtn.Activated:Connect(function()
 					pickKey, pickLabel = s.key, s.label
 					hoverIndex = nil
@@ -1249,23 +1394,45 @@ if EMOTE_WHEEL then
 				defBtn.Activated:Connect(function()
 					Anim.reset(s.key)
 				end)
-				rows[#rows + 1] = {slot = s, val = val, defBtn = defBtn}
+				rows[#rows + 1] = {slot = s, val = val, defBtn = defBtn, list = listFrame, pad = listPad}
 			end
 		end
 
 		function refreshCustom()
 			for _, r in ipairs(rows) do
 				local ov = Anim.get(r.slot.key)
+				for _, c in ipairs(r.list:GetChildren()) do
+					if c:IsA("Frame") then c:Destroy() end
+				end
 				if ov then
-					r.val.Text = ov.name
+					r.val.Text = (#ov == 1) and ov[1].name or (#ov .. " animations, random each time")
 					r.val.TextColor3 = C.accentText
 					r.defBtn.BackgroundTransparency = 0
 					r.defBtn.TextTransparency = 0
+					r.pad.PaddingBottom = UDim.new(0, 6)
+					for i, it in ipairs(ov) do
+						local row = mk("Frame", {LayoutOrder = i, Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1}, r.list)
+						mk("TextLabel", {
+							Size = UDim2.new(1, -28, 1, 0), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+							TextSize = 10, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+							TextTruncate = Enum.TextTruncate.AtEnd, Text = i .. ". " .. it.name,
+						}, row)
+						local x = mk("TextButton", {
+							Size = UDim2.fromOffset(22, 18), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Text = "x",
+						}, row)
+						plain(x)
+						x.TextSize = 11
+						local slotKey = r.slot.key
+						x.Activated:Connect(function()
+							Anim.removeAt(slotKey, i)
+						end)
+					end
 				else
 					r.val.Text = "Default (" .. r.slot.note .. ")"
 					r.val.TextColor3 = C.sub
 					r.defBtn.BackgroundTransparency = 0.6
 					r.defBtn.TextTransparency = 0.5
+					r.pad.PaddingBottom = UDim.new(0, 0)
 				end
 			end
 		end
@@ -1361,7 +1528,9 @@ if EMOTE_WHEEL then
 				if pickKey then
 					local key = pickKey
 					pickKey = nil
-					Anim.set(key, item.id, item.name)
+					if not Anim.add(key, item.id, item.name) then
+						warn("[CustomAnims] Not added (already in the list, or the slot is full: max " .. Anim.MAX .. ")")
+					end
 					setTab("custom")
 				else
 					Emote.pending = item.id
@@ -1493,6 +1662,10 @@ task.spawn(function()
 		b.Text = "DASH"
 		b.Parent = gui
 		UI.styleButton(b)
+		b.Visible = Sys.on("dash")
+		table.insert(Sys.listeners, function(key, on)
+			if key == "dash" and b.Parent then b.Visible = on end
+		end)
 		b.Activated:Connect(function()
 			Input.dashAt = os.clock()
 		end)
@@ -1659,22 +1832,23 @@ local function bindCharacter(char)
 	local crawlTracks = loadList(CRAWL_IDS, "Crawl", true)
 	local climbTracks = loadList(CLIMB_IDS, "Climb", true)
 
+	local slotMap
 	do
-		local slotMap = {
+		slotMap = {
 			idle = {list = idleTracks, defaults = IDLE_IDS, label = "Idle", looped = true},
-			walk = {entry = walkTrack, default = WALK_ID},
-			jog = {entry = mediumTrack, default = MEDIUM_ID},
-			run = {entry = runTrack, default = RUN_ID},
+			walk = {list = {walkTrack}, defaults = {WALK_ID}, label = "Walk", looped = true, set = function(e) walkTrack = e end},
+			jog = {list = {mediumTrack}, defaults = {MEDIUM_ID}, label = "Jog", looped = true, set = function(e) mediumTrack = e end},
+			run = {list = {runTrack}, defaults = {RUN_ID}, label = "Run", looped = true, set = function(e) runTrack = e end},
 			jump = {list = jumpTracks, defaults = JUMP_IDS, label = "Jump", looped = false},
-			flip = {entry = flipTrack, default = FLIP_ID},
+			flip = {list = {flipTrack}, defaults = {FLIP_ID}, label = "Flip", looped = false, set = function(e) flipTrack = e end},
 			fall = {list = fallTracks, defaults = FALL_IDS, label = "Fall", looped = true},
-			roll = {entry = rollTrack, default = ROLL_ID},
-			wallhang = {entry = wallIdleTrack, default = WALL_IDLE_ID},
+			roll = {list = {rollTrack}, defaults = {ROLL_ID}, label = "Roll", looped = false, set = function(e) rollTrack = e end},
+			wallhang = {list = {wallIdleTrack}, defaults = {WALL_IDLE_ID}, label = "Wall hang", looped = true, set = function(e) wallIdleTrack = e end},
 			swing = {list = swingTracks, defaults = SWING_IDS, label = "Swing", looped = true},
-			swinghang = {entry = swingHangTrack, default = SWING_HANG_ID},
+			swinghang = {list = {swingHangTrack}, defaults = {SWING_HANG_ID}, label = "Swing hang", looped = true, set = function(e) swingHangTrack = e end},
 			climb = {list = climbTracks, defaults = CLIMB_IDS, label = "Climb", looped = true},
-			knee = {entry = kneeTrack, default = KNEE_SLIDE_ID},
-			belly = {entry = bellyTrack, default = BELLY_SLIDE_ID},
+			knee = {list = {kneeTrack}, defaults = {KNEE_SLIDE_ID}, label = "Knee slide", looped = false, set = function(e) kneeTrack = e end},
+			belly = {list = {bellyTrack}, defaults = {BELLY_SLIDE_ID}, label = "Belly slide", looped = false, set = function(e) bellyTrack = e end},
 			crawl = {list = crawlTracks, defaults = CRAWL_IDS, label = "Crawl", looped = true},
 			crouch = {list = crouchTracks, defaults = CROUCH_IDS, label = "Crouch", looped = true},
 		}
@@ -1697,25 +1871,28 @@ local function bindCharacter(char)
 			local s = slotMap[key]
 			if not s then return end
 			local ov = Anim.get(key)
-			if s.list then
-				local wanted = ov and {ov.id} or s.defaults
-				for i = 1, math.max(#s.list, #wanted) do
-					local e, id = s.list[i], wanted[i]
-					if id then
-						local nm = s.label .. " " .. i .. " (" .. id .. ")"
-						if e then
-							resetEntry(e, id, nm)
-						else
-							s.list[i] = loadTrack(id, nm, s.looped)
-						end
-					elseif e and not e.disabled then
-						e.disabled = true
-						stopEntry(e)
+			local wanted = s.defaults
+			if ov then
+				wanted = {}
+				for i, it in ipairs(ov) do wanted[i] = it.id end
+			end
+			for i = 1, math.max(#s.list, #wanted) do
+				local e, id = s.list[i], wanted[i]
+				if id then
+					local nm = s.label .. " " .. i .. " (" .. id .. ")"
+					if e then
+						resetEntry(e, id, nm)
+					else
+						s.list[i] = loadTrack(id, nm, s.looped)
 					end
+				elseif e and not e.disabled then
+					e.disabled = true
+					stopEntry(e)
 				end
-			else
-				local id = ov and ov.id or s.default
-				resetEntry(s.entry, id, "Anim " .. key .. " (" .. id .. ")")
+			end
+			if s.set then
+				s.set(s.list[1])
+				s.last = nil
 			end
 		end
 		Anim.apply = function(key)
@@ -1772,6 +1949,16 @@ local function bindCharacter(char)
 			return options[math.random(#options)]
 		end
 		return 0
+	end
+
+	local function chooseSingle(key)
+		local s = slotMap[key]
+		if not (s and s.set) or #s.list <= 1 then return end
+		local idx = pickRandom(s.list, s.last or 0)
+		if idx > 0 then
+			s.last = idx
+			s.set(s.list[idx])
+		end
 	end
 
 	local rayParams = RaycastParams.new()
@@ -1845,25 +2032,36 @@ local function bindCharacter(char)
 	end
 	local curSpeed = startSpeedFor(targetSpeed)
 	local lastSet = curSpeed
+	local speedTouched, preSpeed, speedWasOn = false, hum.WalkSpeed, false
 	local function applySpeed(v)
+		if not speedTouched then
+			speedTouched = true
+			preSpeed = hum.WalkSpeed
+		end
 		curSpeed = v
 		lastSet = v
 		hum.WalkSpeed = v
 	end
-	applySpeed(curSpeed)
+	-- puts the game's normal walk speed back (used when Speed build-up is OFF)
+	local function releaseSpeed()
+		if speedTouched then
+			speedTouched = false
+			pcall(function() hum.WalkSpeed = preSpeed end)
+		end
+	end
 	local function maxSpeed()
-		return targetSpeed
+		if Sys.on("speed") then return targetSpeed end
+		return math.max(speedTouched and preSpeed or hum.WalkSpeed, 1)
 	end
 
 	local watchSpeed = false
 	task.delay(0.3, function()
 		if not alive then return end
-		applySpeed(curSpeed)
 		watchSpeed = true
 	end)
 
 	local function pollExternalSpeed()
-		if not watchSpeed then return end
+		if not (watchSpeed and Sys.on("speed")) then return end
 		local v = hum.WalkSpeed
 		if math.abs(v - lastSet) > 0.01 + math.abs(lastSet) * 1e-4 then
 			targetSpeed = v
@@ -1874,6 +2072,7 @@ local function bindCharacter(char)
 	local fallMin = 0
 	local shakeMag = 0
 	local function shake(m)
+		if not Sys.on("fx") then return end
 		shakeMag = math.max(shakeMag, m)
 	end
 
@@ -1900,7 +2099,25 @@ local function bindCharacter(char)
 		e.Rate = rate
 		e.Enabled = false
 		e.Parent = parent
-		return e
+		-- Particles + shake switch: while it is OFF this emitter never emits
+		return setmetatable({}, {
+			__index = function(_, k)
+				if k == "Emit" then
+					return function(_, n)
+						if Sys.on("fx") then e:Emit(n) end
+					end
+				end
+				local v = e[k]
+				if type(v) == "function" then
+					return function(_, ...) return v(e, ...) end
+				end
+				return v
+			end,
+			__newindex = function(_, k, v)
+				if k == "Enabled" and v and not Sys.on("fx") then v = false end
+				e[k] = v
+			end,
+		})
 	end
 	local function dustProps()
 		return {
@@ -1961,7 +2178,7 @@ local function bindCharacter(char)
 	end
 
 	local function shockwave(pos, normal, color, maxSize, duration)
-		if not SHOCKWAVES or not EFFECTS_ENABLED then return end
+		if not SHOCKWAVES or not EFFECTS_ENABLED or not Sys.on("fx") then return end
 		maxSize = maxSize * 0.75
 		local ring = Instance.new("Part")
 		ring.Shape = Enum.PartType.Cylinder
@@ -2052,7 +2269,7 @@ local function bindCharacter(char)
 			local flatLand = Vector3.new(lv0.X, 0, lv0.Z).Magnitude
 			local drop = AirT.peak - root.Position.Y
 			AirT.peak = root.Position.Y
-			local willRoll = ROLL_ENABLED and drop >= ROLL_MIN_DROP
+			local willRoll = Sys.on("roll") and drop >= ROLL_MIN_DROP
 				and (flatLand > 8 or hum.MoveDirection.Magnitude > 0.1)
 			if willRoll then rollPending = true end
 			if impact > 18 then
@@ -2233,6 +2450,7 @@ local function bindCharacter(char)
 	end
 
 	local function startWallWalk(normal)
+		chooseSingle("wallhang")
 		wallWalking = true
 		wwN = normal.Unit
 		local up = projectOnSurface(Vector3.yAxis, wwN)
@@ -2305,6 +2523,7 @@ local function bindCharacter(char)
 	end
 
 	function WW.start(res, fd, side, spd, now)
+		chooseSingle("wallhang")
 		startWallWalk(res.Normal)
 		local hn = Vector3.new(wwN.X, 0, wwN.Z)
 		hn = hn.Magnitude > 0.1 and hn.Unit or Vector3.new(-fd.Z, 0, fd.X)
@@ -2617,7 +2836,7 @@ local function bindCharacter(char)
 	end
 
 	local function tryVault(res, flat, now)
-		if not VAULT_ENABLED or hum.FloorMaterial == Enum.Material.Air then return false end
+		if not Sys.on("vault") or hum.FloorMaterial == Enum.Material.Air then return false end
 		local floorRes = workspace:Raycast(root.Position, Vector3.new(0, -6, 0), rayParams)
 		local feetY = floorRes and floorRes.Position.Y or (root.Position.Y - 3)
 		local origin = Vector3.new(res.Position.X, feetY + VAULT_MAX_H + 1, res.Position.Z) + flat * 0.7
@@ -2646,6 +2865,10 @@ local function bindCharacter(char)
 	end
 
 	local function tryStartClimb(state, dt, now)
+		if not (Sys.on("wallwalk") or Sys.on("vault") or Sys.on("wallrun") or Sys.on("ceiling")) then
+			pushTime = 0
+			return false
+		end
 		if now < climbLockUntil
 			or state == Enum.HumanoidStateType.Climbing
 			or state == Enum.HumanoidStateType.Swimming
@@ -2654,7 +2877,7 @@ local function bindCharacter(char)
 			pushTime = 0
 			return false
 		end
-		if CEILING_WALK and (state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall) then
+		if Sys.on("ceiling") and (state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall) then
 			local v = root.AssemblyLinearVelocity
 			if v.Y > 4 then
 				local up = workspace:Raycast(root.Position, Vector3.new(0, CEILING_REACH, 0), rayParams)
@@ -2665,7 +2888,7 @@ local function bindCharacter(char)
 				end
 			end
 		end
-		if WALLRUN_ENABLED and (state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall) then
+		if Sys.on("wallrun") and (state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall) then
 			local v = root.AssemblyLinearVelocity
 			local fv = Vector3.new(v.X, 0, v.Z)
 			local mdv = hum.MoveDirection
@@ -2702,6 +2925,7 @@ local function bindCharacter(char)
 			if pushTime >= (chaining and 0 or CLIMB_START_DELAY) then
 				pushTime = 0
 				if tryVault(res, flat, now) then return true end
+				if not Sys.on("wallwalk") then return false end
 				if wallWalkMode then
 					startWallWalk(res.Normal)
 				else
@@ -2729,6 +2953,8 @@ local function bindCharacter(char)
 	end
 
 	local function startSlide(now)
+		chooseSingle("knee")
+		chooseSingle("belly")
 		local md = hum.MoveDirection
 		local flat = Vector3.new(md.X, 0, md.Z)
 		if flat.Magnitude < 0.1 then
@@ -2739,7 +2965,7 @@ local function bindCharacter(char)
 			flat = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
 		end
 		slideDir = flat.Unit
-		slideBase = curSpeed
+		slideBase = Sys.on("speed") and curSpeed or math.max(hum.WalkSpeed, 1)
 		slideSpeed = slideBase * SLIDE_BOOST
 		slideStart = now
 		fallMin = 0
@@ -2833,6 +3059,7 @@ local function bindCharacter(char)
 	local nextScan, lastAnchorSeen = 0, 0
 
 	local function findSwingAnchor()
+		if not Sys.on("swing") then return nil end
 		local cam = workspace.CurrentCamera
 		local look = cam and cam.CFrame.LookVector or root.CFrame.LookVector
 		local fwd = Vector3.new(look.X, 0, look.Z)
@@ -2885,6 +3112,7 @@ local function bindCharacter(char)
 	end
 
 	local function startSwing(anchor, now)
+		chooseSingle("swinghang")
 		swinging = true
 		swingAnchor = anchor
 		swingStart = now
@@ -3069,7 +3297,7 @@ local function bindCharacter(char)
 		stance = n
 		Hud.crawling = (n == 2)
 		if n == 0 then
-			applySpeed(startSpeedFor(targetSpeed))
+			if Sys.on("speed") then applySpeed(startSpeedFor(targetSpeed)) else releaseSpeed() end
 			setTrack(nil)
 		else
 			if n == 1 then
@@ -3083,7 +3311,7 @@ local function bindCharacter(char)
 	end
 
 	local function handleStance(req, now)
-		if swinging or climbing or wallWalking or sliding or hum.Sit then return end
+		if not Sys.on("crawl") or swinging or climbing or wallWalking or sliding or hum.Sit then return end
 		if hum.FloorMaterial == Enum.Material.Air then return end
 		if req == "cycle" then
 			setStance(stance == 0 and 2 or 0)
@@ -3158,6 +3386,7 @@ local function bindCharacter(char)
 
 	local function doDoubleJump(now)
 		doubleUsed = true
+		chooseSingle("flip")
 		local v = root.AssemblyLinearVelocity
 		root.AssemblyLinearVelocity = Vector3.new(v.X, DOUBLE_JUMP_POWER, v.Z)
 		local len = FLIP_TIME
@@ -3184,7 +3413,7 @@ local function bindCharacter(char)
 	local dashHandled = os.clock()
 
 	local function doDash(now)
-		if now < dashCooldownUntil or sliding or swinging or climbing or wallWalking then return end
+		if not Sys.on("dash") or now < dashCooldownUntil or sliding or swinging or climbing or wallWalking then return end
 		local cam = workspace.CurrentCamera
 		local md = hum.MoveDirection
 		local d = Vector3.new(md.X, 0, md.Z)
@@ -3250,13 +3479,13 @@ local function bindCharacter(char)
 			return
 		end
 
-		if DOUBLE_JUMP_ENABLED and not doubleUsed and not hum.Sit
+		if Sys.on("doublejump") and not doubleUsed and not hum.Sit
 			and hum.FloorMaterial == Enum.Material.Air then
 			doDoubleJump(now)
 			return
 		end
 
-		if doubleUsed and not hum.Sit and hum.FloorMaterial == Enum.Material.Air
+		if Sys.on("slide") and doubleUsed and not hum.Sit and hum.FloorMaterial == Enum.Material.Air
 			and now > slideCooldownUntil and not pendingSlide then
 			local v = root.AssemblyLinearVelocity
 			pendingSlide = now + 1.5
@@ -3301,7 +3530,7 @@ local function bindCharacter(char)
 				hum.PlatformStand = false
 				hum.AutoRotate = true
 				local base = hum:GetAttribute("CA_BaseWS")
-				if base then hum.WalkSpeed = base end
+				if base and speedTouched then hum.WalkSpeed = base end
 			end
 		end)
 		for i, f in ipairs(Session.kills) do
@@ -3351,7 +3580,16 @@ local function bindCharacter(char)
 			hum.CameraOffset = Vector3.zero
 		end
 
-		if not climbing and not sliding and not wallWalking and not swinging and stance == 0 then
+		if not Sys.on("speed") then
+			speedWasOn = false
+			if not climbing and not sliding and not wallWalking and not swinging and stance == 0 then
+				releaseSpeed()
+			end
+		elseif not climbing and not sliding and not wallWalking and not swinging and stance == 0 then
+			if not speedWasOn then
+				speedWasOn = true
+				applySpeed(startSpeedFor(targetSpeed))
+			end
 			local start = startSpeedFor(targetSpeed)
 			local isMoving = hum.MoveDirection.Magnitude > 0.1
 			local rate = (targetSpeed - start) / rampDuration(targetSpeed)
@@ -3367,6 +3605,9 @@ local function bindCharacter(char)
 
 		if grounded or climbing or wallWalking or swinging then
 			doubleUsed = false
+		end
+		if stance > 0 and not Sys.on("crawl") then
+			setStance(0)
 		end
 		if stance > 0 and (swinging or climbing or wallWalking or sliding) then
 			setStance(0)
@@ -3430,6 +3671,7 @@ local function bindCharacter(char)
 
 		if rollPending then
 			rollPending = false
+			chooseSingle("roll")
 			if not pendingSlide and usable(rollTrack) then
 				local v = root.AssemblyLinearVelocity
 				local flat = Vector3.new(v.X, 0, v.Z)
@@ -3579,6 +3821,9 @@ local function bindCharacter(char)
 			if not wasMoving then
 				smoothSpeed = flatSpeed
 				tier = 1
+				chooseSingle("walk")
+				chooseSingle("jog")
+				chooseSingle("run")
 			else
 				smoothSpeed = smoothSpeed + (flatSpeed - smoothSpeed) * math.min(1, dt * 10)
 			end
